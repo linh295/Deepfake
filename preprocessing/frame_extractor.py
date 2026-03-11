@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+
 from pathlib import Path
 
 import cv2
@@ -159,3 +161,38 @@ def extract_frames_from_metadata(
     manifest = pd.DataFrame.from_records(records)
     manifest.to_csv(output_dir / "frame_manifest.csv", index=False)
     return manifest
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Extract video frames from cleaned metadata CSV")
+    parser.add_argument("--clean-csv", type=Path, default=Path("artifacts/clean_metadata.csv"))
+    parser.add_argument("--output-dir", type=Path, default=Path("artifacts/frames_5fps"))
+    parser.add_argument("--target-fps", type=float, default=5.0)
+    parser.add_argument("--max-videos", type=int, default=0)
+    parser.add_argument("--resize-width", type=int, default=0)
+    parser.add_argument("--resize-height", type=int, default=0)
+    parser.add_argument("--image-extension", type=str, default=".jpg")
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    image_size = None
+    if args.resize_width > 0 and args.resize_height > 0:
+        image_size = (args.resize_width, args.resize_height)
+
+    manifest = extract_frames_from_metadata(
+        clean_csv=args.clean_csv,
+        output_dir=args.output_dir,
+        target_fps=args.target_fps,
+        image_size=image_size,
+        max_videos=args.max_videos,
+        image_extension=args.image_extension,
+    )
+    print(f"Saved frame manifest -> {args.output_dir / 'frame_manifest.csv'} (videos={len(manifest)})")
+
+
+if __name__ == "__main__":
+    main()

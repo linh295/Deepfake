@@ -1,0 +1,36 @@
+# Pipeline mặc định khi chạy: run-config
+# 1) clean metadata -> 2) extract frames -> 3) standardize (nếu enabled=true)
+
+[paths]
+dataset_root = "FaceForensics++_C23 2"
+metadata_csv = "FaceForensics++_C23 2/csv/FF++_Metadata_Shuffled.csv"
+artifact_dir = "artifacts"
+
+[clean]
+# clean = làm sạch + chuẩn hoá metadata video trước khi extract frame:
+# - chuẩn hoá nhãn Label -> label (0/1) và label_str (REAL/FAKE)
+# - tạo các cột chuẩn: video_abs_path, video_rel_path, video_id, method, num_frames
+# - lọc video có ít hơn min_frames
+# - check_file_exists=true sẽ bỏ record có file video không tồn tại
+output_csv = "artifacts/clean_metadata.csv"
+min_frames = 16
+check_file_exists = true
+
+[extract]
+# output frame theo cấu trúc: output_dir/{real|fake}/{method}/{video_id}/frame_*.jpg
+output_dir = "artifacts/frames_5fps"
+target_fps = 5.0
+max_videos = 0
+resize_width = 0
+resize_height = 0
+image_extension = ".jpg"
+
+[standardize]
+# enabled=true: chuẩn hoá từ frame_manifest.csv sau extract
+enabled = true
+output_dir = "artifacts/dataset_standardized"
+# mode: "flat"       -> real/<video_id>/
+#        "by_method"  -> real/<method>/<video_id>/
+mode = "flat"
+# copy_mode: "copy" hoặc "symlink" (symlink nhanh hơn, không tốn dung lượng)
+copy_mode = "copy"
