@@ -1,0 +1,11 @@
+[project]
+name = "deepfake"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "opencv-python>=4.13.0.92",
+    "pandas>=3.0.1",
+    "tqdm>=4.67.3",
+]
