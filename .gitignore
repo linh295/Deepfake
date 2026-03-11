@@ -1,0 +1,59 @@
+FaceForensics++_C23 2/
+artifacts/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite
+*.log
+*.bak
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+*.zip
+*.tar.gz
+*.tar.bz2
+*.7z
+*.exe
+*.dll
+*.so
+*.dylib
+*.ipynb_checkpoints/
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+# Ignore virtual environment directories
+venv/
+env/
+# Ignore Python bytecode files
+*.pyc
+# Ignore log files
+*.log
+# Ignore database files
+*.db
+*.sqlite
+# Ignore backup files
+*.bak
+# Ignore temporary files
+*.tmp
+# Ignore swap files
+*.swp
+# Ignore macOS specific files
+.DS_Store
+# Ignore Windows specific files
+Thumbs.db
+# Ignore compressed files
+*.zip
+*.tar.gz
+*.tar.bz2
+*.7z
+# Ignore executable files
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Ignore environment variable files
+.env
