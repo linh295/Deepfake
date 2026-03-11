@@ -1,0 +1,1 @@
+#TODO sử dụng retinaface model để detect face lấy bbox và crop frame = bbox x 15-20% để có thể lấy được cả tóc và cằm, sau đó resize về 224x224

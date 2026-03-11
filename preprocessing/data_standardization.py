@@ -1,0 +1,1 @@
+#TODO sử dụng để chưa script chuẩn hóa lại folder real và fake
