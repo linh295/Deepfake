@@ -57,3 +57,6 @@ Thumbs.db
 
 # Ignore environment variable files
 .env
+
+frame_data/
+models/
