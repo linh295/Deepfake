@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     # Frame extraction settings
     TARGET_FPS: int = 5
     FRAME_EXTRACTION_METADATA_CSV: str = "frame_extraction_metadata.csv"
+
+    # Face detection settings
+    FACE_DETECTION_THRESHOLD: float = 0.9
+    FACE_DETECTION_BACKUP_SUFFIX: str = ".bak.csv"
+    RETINAFACE_WEIGHT_DIR: pathlib.Path = MODEL_DIR / "retinaface_weight"
     
     # Performance tuning
     JPEG_QUALITY: int = 85  # 75=fastest, 85=balanced, 95=best quality (slower)

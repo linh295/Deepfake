@@ -11,5 +11,8 @@ dependencies = [
     "pandas>=3.0.1",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.1",
+    "retina-face>=0.0.17",
+    "scikit-learn>=1.8.0",
+    "tf-keras>=2.20.1",
     "tqdm>=4.67.3",
 ]
