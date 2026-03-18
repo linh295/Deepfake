@@ -15,4 +15,5 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "tf-keras>=2.20.1",
     "tqdm>=4.67.3",
+    "webdataset>=1.0.2",
 ]
