@@ -1,90 +1,93 @@
-# Preprocessing Pipeline
+# Deepfake Preprocessing Pipeline
 
-Pipeline được tách theo đúng chức năng:
+This repository builds a training-ready deepfake dataset from raw FaceForensics++ style videos.
 
-- `preprocessing/metadata_cleaner.py`: clean metadata đầu vào.
-- `preprocessing/frame_extractor.py`: tách frame từ video.
-- `preprocessing/data_standardization.py`: chuẩn hoá dữ liệu frame theo cấu trúc train.
+The current pipeline is organized around four stages:
 
-Lệnh điều phối nằm ở `main.py`.
+1. `preprocessing/metadata_level.py`
+   Builds `videos_master.csv` with video-level metadata and deterministic `train/val/test` splits.
+2. `preprocessing/frame_extractor.py`
+   Extracts frames and writes `frame_extraction_metadata.csv`.
+3. `preprocessing/face_detection.py`
+   Detects the main face, aligns the image, crops around the aligned bounding box, and writes frame-level WebDataset shards.
+4. `preprocessing/build_clips.py`
+   Groups aligned frames into fixed-length clips and writes clip-level WebDataset shards.
 
-## 1) Cài dependencies
+## Repository Layout
+
+```text
+configs/         Runtime settings and logging
+preprocessing/   Data preparation stages
+tests/           Unit and integration tests for preprocessing
+docs/            Architecture, pipeline, and data contracts
+artifacts/       Generated CSV/parquet and temporary outputs
+frame_data/      Extracted frames and frame metadata
+crop_data/       Face-aligned frame shards
+clip_data/       Clip-level shards
+```
+
+## Quickstart
+
+Install dependencies:
 
 ```bash
 pip install -e .
 ```
 
-## 2) Clean là gì?
-
-`clean-metadata` là bước làm sạch và chuẩn hoá metadata video trước khi extract frame, gồm:
-
-- Chuẩn hoá nhãn `Label` về `label` (0/1) và `label_str` (REAL/FAKE).
-- Tạo cột dùng chung cho các bước sau: `video_abs_path`, `video_rel_path`, `video_id`, `method`, `num_frames`.
-- Lọc video không đủ số frame tối thiểu (`min_frames`).
-- (Tuỳ chọn) kiểm tra file video có tồn tại thật trên đĩa.
-
-Output của bước này là `artifacts/clean_metadata.csv`.
-
-## 3) Input yêu cầu cho extract
-
-File `--clean-csv` phải có các cột:
-
-- `video_abs_path`
-- `video_rel_path`
-- `video_id`
-- `method`
-- `label`
-- `label_str`
-- `num_frames`
-
-## 4) Chạy clean + extract (khuyến nghị)
+Generate video-level metadata:
 
 ```bash
-python main.py clean-metadata \
-  --dataset-root "FaceForensics++_C23 2" \
-  --metadata-csv "FaceForensics++_C23 2/csv/FF++_Metadata_Shuffled.csv" \
-  --output-csv artifacts/clean_metadata.csv
-
-python main.py extract-frames \
-  --clean-csv artifacts/clean_metadata.csv \
-  --output-dir artifacts/frames_5fps \
-  --target-fps 5
+python -m preprocessing.metadata_level --dataset-dir FaceForensics++_C23 --output-dir artifacts --output-name videos_master
 ```
 
-## 5) Chạy extract 5fps
+Extract frames for a single split:
 
 ```bash
-python main.py extract-frames \
-  --clean-csv artifacts/clean_metadata.csv \
-  --output-dir artifacts/frames_5fps \
-  --target-fps 5
+python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train
 ```
 
-Tuỳ chọn resize:
+Build aligned face shards for the same split:
 
 ```bash
-python main.py extract-frames \
-  --clean-csv artifacts/clean_metadata.csv \
-  --output-dir artifacts/frames_5fps_224 \
-  --target-fps 5 \
-  --resize-width 224 \
-  --resize-height 224
+python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split train
 ```
 
-## 6) Output
-
-- Frame được lưu theo nhãn đã chuẩn hoá:
-  - `artifacts/frames_5fps/real/<method>/<video_id>/frame_*.jpg`
-  - `artifacts/frames_5fps/fake/<method>/<video_id>/frame_*.jpg`
-- Manifest: `artifacts/frames_5fps/frame_manifest.csv`
-
-## 7) Chuẩn hoá sau khi extract (tuỳ chọn)
+Build clip shards from aligned frame shards:
 
 ```bash
-python main.py standardize \
-  --manifest-csv artifacts/frames_5fps/frame_manifest.csv \
-  --frames-root artifacts/frames_5fps \
-  --output-dir artifacts/dataset_standardized \
-  --mode flat \
-  --copy-mode copy
+python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split train
+```
+
+Repeat the frame, face, and clip stages for `val` and `test` when running the full dataset.
+
+## Output Summary
+
+- `artifacts/videos_master.csv`
+  Video-level manifest with deterministic split assignment.
+- `frame_data/frame_extraction_metadata.csv`
+  Frame-level manifest produced by `frame_extractor.py`.
+- `crop_data/<split>/shard-*.tar`
+  Frame-level WebDataset shards containing aligned face crops.
+- `clip_data/<split>/shard-*.tar`
+  Clip-level WebDataset shards containing `rgb.npy`, `diff.npy`, and metadata.
+
+## Documentation
+
+- [Pipeline Guide](docs/preprocessing-pipeline.md)
+- [Architecture](docs/architecture.md)
+- [Data Contracts](docs/data-contracts.md)
+- [Contributing](CONTRIBUTING.md)
+
+## Testing
+
+Run the preprocessing test suite:
+
+```bash
+python -m unittest tests.test_face_detection tests.test_face_detection_split tests.test_face_detection_crop
+```
+
+Compile-check the main modules:
+
+```bash
+python -m compileall preprocessing tests
 ```
