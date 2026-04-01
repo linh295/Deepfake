@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     # Directory paths
     RAW_DATA_DIR: pathlib.Path = ROOT_DIR / "FaceForensics++_C23 2"
     FRAME_DATA_DIR: pathlib.Path = ROOT_DIR / "frame_data"
+    CROP_DATA_DIR: pathlib.Path = ROOT_DIR / "crop_data"
+    AUDIT_FILE: pathlib.Path = ROOT_DIR / "audit" / "face_detection_audit.csv"
     MODEL_DIR: pathlib.Path = ROOT_DIR / "models"
     
     # Frame extraction settings

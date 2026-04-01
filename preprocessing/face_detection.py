@@ -3,12 +3,17 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib
+import json
 import os
+import re
+import tarfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import cv2
+import numpy as np
 from tqdm import tqdm
+from webdataset import ShardWriter
 
 from configs.loggings import logger, setup_logging
 from configs.settings import settings
@@ -26,16 +31,16 @@ except Exception as import_error:  # pragma: no cover
     RETINAFACE_IMPORT_ERROR = import_error
 
 
-NEW_COLUMNS = [
-    "face_detected",
-    "num_faces",
-    "face_confidence",
-    "bbox_x1",
-    "bbox_y1",
-    "bbox_x2",
-    "bbox_y2",
-    "bbox_source",
-]
+ARCFACE_112_TEMPLATE = np.array(
+    [
+        [38.2946, 51.6963],  # left_eye
+        [73.5318, 51.5014],  # right_eye
+        [56.0252, 71.7366],  # nose
+        [41.5493, 92.3655],  # mouth_left
+        [70.7299, 92.2041],  # mouth_right
+    ],
+    dtype=np.float32,
+)
 
 
 def _ensure_retinaface_available() -> None:
@@ -49,32 +54,82 @@ def _ensure_retinaface_available() -> None:
         raise RuntimeError("RetinaFace is not installed. Install it with: uv add retina-face")
 
 
-def _best_face_from_result(result: Any) -> tuple[int, float, Optional[list[int]]]:
-    if not result or not isinstance(result, dict):
-        return 0, 0.0, None
+def _normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
 
-    best_score = -1.0
-    best_bbox: Optional[list[int]] = None
-    face_count = 0
 
-    for _, face_data in result.items():
-        if not isinstance(face_data, dict):
+def _extract_video_group_key(row: Dict[str, str]) -> str:
+    category = _normalize_text(row.get("category"))
+    video_name = _normalize_text(row.get("video_name"))
+
+    if video_name:
+        return f"{category}/{video_name}" if category else video_name
+
+    video_id = _normalize_text(row.get("video_id"))
+    if video_id:
+        return f"{category}/{video_id}" if category else video_id
+
+    source_video_id = _normalize_text(row.get("source_video_id"))
+    if source_video_id:
+        return f"{category}/{source_video_id}" if category else source_video_id
+
+    video_rel_path = _normalize_text(row.get("video_rel_path"))
+    if video_rel_path:
+        return f"{category}/{video_rel_path}" if category else video_rel_path
+
+    video_abs_path = _normalize_text(row.get("video_abs_path"))
+    if video_abs_path:
+        return video_abs_path
+
+    frame_path = _normalize_text(row.get("frame_path"))
+    if frame_path:
+        stem = Path(frame_path).stem
+        return f"{category}/{stem}" if category else stem
+
+    return f"{category}/unknown_video" if category else "unknown_video"
+
+
+def _group_rows_by_video(
+    rows: List[Dict[str, str]],
+    category_filter: Optional[str],
+) -> Dict[str, List[tuple[int, Dict[str, str]]]]:
+    grouped: Dict[str, List[tuple[int, Dict[str, str]]]] = {}
+
+    for idx, row in enumerate(rows):
+        if category_filter and row.get("category", "") != category_filter:
             continue
+        video_key = _extract_video_group_key(row)
+        grouped.setdefault(video_key, []).append((idx, row))
 
-        bbox = face_data.get("facial_area")
-        score = float(face_data.get("score", 0.0))
-        if not bbox or len(bbox) != 4:
-            continue
+    return grouped
 
-        face_count += 1
-        if score > best_score:
-            best_score = score
-            best_bbox = [int(v) for v in bbox]
 
-    if face_count == 0 or best_bbox is None:
-        return 0, 0.0, None
+def _sort_video_rows(video_rows: List[tuple[int, Dict[str, str]]]) -> List[tuple[int, Dict[str, str]]]:
+    def _frame_sort_key(item: tuple[int, Dict[str, str]]) -> tuple[int, str]:
+        _, row = item
 
-    return face_count, round(best_score, 6), best_bbox
+        frame_idx_str = (
+            row.get("frame_number")
+            or row.get("frame_index")
+            or row.get("frame_idx")
+            or row.get("original_frame_index")
+            or ""
+        ).strip()
+
+        if frame_idx_str.isdigit():
+            return int(frame_idx_str), row.get("frame_path", "")
+
+        frame_path = row.get("frame_path", "")
+        stem = Path(frame_path).stem
+        digits = "".join(ch for ch in stem if ch.isdigit())
+        if digits.isdigit():
+            return int(digits), frame_path
+
+        return 10**12, frame_path
+
+    return sorted(video_rows, key=_frame_sort_key)
 
 
 def _resize_for_detection(image: Any, max_side: int) -> tuple[Any, float]:
@@ -91,40 +146,97 @@ def _resize_for_detection(image: Any, max_side: int) -> tuple[Any, float]:
     return resized, scale
 
 
-def detect_face_on_image(
-    image_path: Path,
-    threshold: float,
-    max_side: int,
-) -> tuple[int, float, Optional[list[int]], str]:
-    """
-    Returns:
-        num_faces, confidence, bbox, status
-    status in {"ok", "missing_file", "read_fail", "detect_error", "no_face"}
-    """
-    if RetinaFace is None:
-        return 0, 0.0, None, "detect_error"
-
+def load_image(image_path: Path) -> tuple[Optional[Any], str]:
     if not image_path.exists():
-        return 0, 0.0, None, "missing_file"
+        return None, "missing_file"
 
     image = cv2.imread(str(image_path))
     if image is None:
-        return 0, 0.0, None, "read_fail"
+        return None, "read_fail"
+
+    return image, "ok"
+
+
+def _parse_landmarks(landmarks: Any) -> Optional[Dict[str, List[float]]]:
+    if not isinstance(landmarks, dict):
+        return None
+
+    parsed: Dict[str, List[float]] = {}
+    for k, v in landmarks.items():
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            parsed[k] = [float(v[0]), float(v[1])]
+
+    required = {"left_eye", "right_eye", "nose", "mouth_left", "mouth_right"}
+    if not required.issubset(set(parsed.keys())):
+        return None
+
+    return parsed
+
+
+def _best_face_from_result(
+    result: Any,
+) -> tuple[int, float, Optional[list[int]], Optional[Dict[str, List[float]]]]:
+    if not result or not isinstance(result, dict):
+        return 0, 0.0, None, None
+
+    best_score = -1.0
+    best_bbox: Optional[list[int]] = None
+    best_landmarks: Optional[Dict[str, List[float]]] = None
+    face_count = 0
+
+    for _, face_data in result.items():
+        if not isinstance(face_data, dict):
+            continue
+
+        bbox = face_data.get("facial_area")
+        score = float(face_data.get("score", 0.0))
+        landmarks = face_data.get("landmarks")
+
+        if not bbox or len(bbox) != 4:
+            continue
+
+        face_count += 1
+        if score > best_score:
+            best_score = score
+            best_bbox = [int(v) for v in bbox]
+            best_landmarks = _parse_landmarks(landmarks)
+
+    if face_count == 0 or best_bbox is None:
+        return 0, 0.0, None, None
+
+    return face_count, round(best_score, 6), best_bbox, best_landmarks
+
+
+def detect_face_on_array(
+    image: Any,
+    threshold: float,
+    max_side: int,
+) -> tuple[int, float, Optional[list[int]], Optional[Dict[str, List[float]]], str]:
+    if RetinaFace is None:
+        return 0, 0.0, None, None, "detect_error"
+
+    if image is None:
+        return 0, 0.0, None, None, "invalid_image"
 
     resized, scale = _resize_for_detection(image, max_side=max_side)
 
     try:
         result = RetinaFace.detect_faces(resized, threshold=threshold)
     except Exception as e:
-        logger.debug("Detection failed on {}: {}", image_path, e)
-        return 0, 0.0, None, "detect_error"
+        logger.debug("Detection failed on in-memory image: {}", e)
+        return 0, 0.0, None, None, "detect_error"
 
-    num_faces, confidence, bbox = _best_face_from_result(result)
+    num_faces, confidence, bbox, landmarks = _best_face_from_result(result)
     if bbox is None:
-        return 0, 0.0, None, "no_face"
+        return 0, 0.0, None, None, "no_face"
 
     if scale != 1.0:
         bbox = [int(round(v / scale)) for v in bbox]
+        if landmarks is not None:
+            scaled_landmarks: Dict[str, List[float]] = {}
+            for k, pt in landmarks.items():
+                scaled_landmarks[k] = [float(pt[0] / scale), float(pt[1] / scale)]
+            landmarks = scaled_landmarks
 
     h, w = image.shape[:2]
     bbox[0] = max(0, min(bbox[0], w - 1))
@@ -133,453 +245,503 @@ def detect_face_on_image(
     bbox[3] = max(0, min(bbox[3], h - 1))
 
     if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-        return 0, 0.0, None, "no_face"
+        return 0, 0.0, None, None, "no_face"
 
-    return num_faces, confidence, bbox, "ok"
+    return num_faces, confidence, bbox, landmarks, "ok"
 
 
-def _parse_existing_bbox(row: Dict[str, str]) -> Optional[list[int]]:
-    try:
-        x1 = row.get("bbox_x1", "").strip()
-        y1 = row.get("bbox_y1", "").strip()
-        x2 = row.get("bbox_x2", "").strip()
-        y2 = row.get("bbox_y2", "").strip()
-        if not (x1 and y1 and x2 and y2):
-            return None
-        return [int(x1), int(y1), int(x2), int(y2)]
-    except Exception:
+def _retinaface_landmarks_to_template_order(
+    landmarks: Dict[str, List[float]],
+) -> Optional[np.ndarray]:
+    if landmarks is None:
         return None
 
+    required = ["left_eye", "right_eye", "nose", "mouth_left", "mouth_right"]
+    pts = []
+    for key in required:
+        if key not in landmarks:
+            return None
+        v = landmarks[key]
+        if not isinstance(v, (list, tuple)) or len(v) != 2:
+            return None
+        pts.append([float(v[0]), float(v[1])])
 
-def _interpolate_bbox(
-    left_idx: int,
-    left_bbox: list[int],
-    right_idx: int,
-    right_bbox: list[int],
-    target_idx: int,
-) -> list[int]:
-    if right_idx == left_idx:
-        return left_bbox[:]
-
-    ratio = (target_idx - left_idx) / float(right_idx - left_idx)
-    out = []
-    for lv, rv in zip(left_bbox, right_bbox):
-        value = lv + ratio * (rv - lv)
-        out.append(int(round(value)))
-    return out
+    return np.array(pts, dtype=np.float32)
 
 
-def _group_rows_by_video(
-    rows: List[Dict[str, str]],
-    category_filter: Optional[str],
-) -> Dict[str, List[tuple[int, Dict[str, str]]]]:
-    grouped: Dict[str, List[tuple[int, Dict[str, str]]]] = {}
+def align_face_5pts(
+    image: Any,
+    landmarks: Optional[Dict[str, List[float]]],
+    output_size: tuple[int, int],
+) -> tuple[Optional[Any], Optional[np.ndarray], str]:
+    if image is None:
+        return None, None, "read_fail"
 
-    for idx, row in enumerate(rows):
-        if category_filter and row.get("category", "") != category_filter:
-            continue
+    src = _retinaface_landmarks_to_template_order(landmarks)
+    if src is None:
+        return None, None, "missing_landmarks"
 
-        video_id = (
-            row.get("video_id")
-            or row.get("source_video_id")
-            or row.get("video_rel_path")
-            or row.get("video_abs_path")
-        )
-        if not video_id:
-            frame_path = row.get("frame_path", "")
-            video_id = str(Path(frame_path).parent)
+    dst = ARCFACE_112_TEMPLATE.copy()
+    out_w, out_h = output_size
+    if (out_w, out_h) != (112, 112):
+        dst[:, 0] *= out_w / 112.0
+        dst[:, 1] *= out_h / 112.0
 
-        grouped.setdefault(video_id, []).append((idx, row))
+    M, _ = cv2.estimateAffinePartial2D(src, dst, method=cv2.LMEDS)
+    if M is None:
+        return None, None, "align_fail"
 
-    return grouped
-
-
-def _sort_video_rows(video_rows: List[tuple[int, Dict[str, str]]]) -> List[tuple[int, Dict[str, str]]]:
-    def _frame_sort_key(item: tuple[int, Dict[str, str]]) -> tuple[int, str]:
-        _, row = item
-
-        frame_idx_str = (
-            row.get("frame_index")
-            or row.get("frame_idx")
-            or row.get("frame_number")
-            or ""
-        ).strip()
-        if frame_idx_str.isdigit():
-            return int(frame_idx_str), row.get("frame_path", "")
-
-        frame_path = row.get("frame_path", "")
-        stem = Path(frame_path).stem
-        digits = "".join(ch for ch in stem if ch.isdigit())
-        if digits.isdigit():
-            return int(digits), frame_path
-
-        return 10**12, frame_path
-
-    return sorted(video_rows, key=_frame_sort_key)
+    aligned = cv2.warpAffine(
+        image,
+        M,
+        (out_w, out_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT101,
+    )
+    return aligned, M, "ok"
 
 
-def _build_detect_indices(num_rows: int, detect_every_k: int) -> List[int]:
-    if num_rows <= 0:
-        return []
+def encode_image_to_bytes(image: Any, image_format: str, jpeg_quality: int) -> bytes:
+    ext = image_format.lower()
+    if ext not in {".jpg", ".jpeg", ".png"}:
+        raise ValueError(f"Unsupported image format: {image_format}")
 
-    if detect_every_k <= 1:
-        return list(range(num_rows))
+    params: list[int] = []
+    if ext in {".jpg", ".jpeg"}:
+        params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
+    elif ext == ".png":
+        params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
 
-    indices = list(range(0, num_rows, detect_every_k))
-    if indices[-1] != num_rows - 1:
-        indices.append(num_rows - 1)
-    return indices
-
-
-def _apply_row_result(
-    row: Dict[str, str],
-    bbox: Optional[list[int]],
-    num_faces: int,
-    confidence: float,
-    bbox_source: str,
-) -> None:
-    if bbox is None:
-        row["face_detected"] = "0"
-        row["num_faces"] = str(num_faces)
-        row["face_confidence"] = f"{confidence:.6f}"
-        row["bbox_x1"] = ""
-        row["bbox_y1"] = ""
-        row["bbox_x2"] = ""
-        row["bbox_y2"] = ""
-        row["bbox_source"] = bbox_source
-        return
-
-    row["face_detected"] = "1"
-    row["num_faces"] = str(num_faces)
-    row["face_confidence"] = f"{confidence:.6f}"
-    row["bbox_x1"] = str(bbox[0])
-    row["bbox_y1"] = str(bbox[1])
-    row["bbox_x2"] = str(bbox[2])
-    row["bbox_y2"] = str(bbox[3])
-    row["bbox_source"] = bbox_source
+    ok, buffer = cv2.imencode(ext, image, params)
+    if not ok:
+        raise RuntimeError("Failed to encode aligned image")
+    return buffer.tobytes()
 
 
-def _process_single_video(
+def build_sample_key(row: Dict[str, str]) -> str:
+    category = _normalize_text(row.get("category")) or "unknown"
+    video_name = _normalize_text(row.get("video_name")) or "unknownvideo"
+    frame_number = (
+        _normalize_text(row.get("frame_number"))
+        or _normalize_text(row.get("frame_index"))
+        or _normalize_text(row.get("frame_idx"))
+        or _normalize_text(row.get("original_frame_index"))
+        or "0"
+    )
+    frame_path = _normalize_text(row.get("frame_path"))
+    stem = Path(frame_path).stem if frame_path else f"{video_name}_{frame_number}"
+
+    safe_key = f"{category}/{video_name}/{stem}"
+    return safe_key.replace("\\", "/")
+
+
+def _safe_label_id(row: Dict[str, str]) -> int:
+    label_text = row.get("label") or row.get("binary_label") or ""
+    label_text = str(label_text).strip().lower()
+
+    if label_text in {"real", "original", "0"}:
+        return 0
+    if label_text in {"fake", "1"}:
+        return 1
+    return -1
+
+
+def _extract_shard_index(shard_path: Path) -> Optional[int]:
+    match = re.fullmatch(r"shard-(\d{6})\.tar", shard_path.name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def infer_start_shard(output_dir: Path) -> int:
+    shard_indices: List[int] = []
+
+    for shard_path in output_dir.glob("shard-*.tar"):
+        idx = _extract_shard_index(shard_path)
+        if idx is not None:
+            shard_indices.append(idx)
+
+    if not shard_indices:
+        return 0
+
+    return max(shard_indices) + 1
+
+
+def load_processed_keys_from_audit(audit_csv: Optional[Path]) -> Set[str]:
+    keys: Set[str] = set()
+
+    if audit_csv is None or not audit_csv.exists():
+        return keys
+
+    with audit_csv.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            key = _normalize_text(row.get("key"))
+            if key:
+                keys.add(key)
+
+    return keys
+
+
+def _base_key_from_tar_member(member_name: str) -> Optional[str]:
+    path = member_name.replace("\\", "/")
+    if path.endswith("/"):
+        return None
+
+    basename = path.rsplit("/", 1)[-1]
+    if "." not in basename:
+        return None
+
+    base, _ = basename.rsplit(".", 1)
+    if not base:
+        return None
+
+    if "/" in path:
+        parent = path.rsplit("/", 1)[0]
+        return f"{parent}/{base}"
+    return base
+
+
+def load_processed_keys_from_existing_shards(output_dir: Path) -> Set[str]:
+    keys: Set[str] = set()
+    shard_files = sorted(output_dir.glob("shard-*.tar"))
+
+    for shard_path in tqdm(shard_files, desc="Scan existing shards for resume", leave=False):
+        try:
+            with tarfile.open(shard_path, "r") as tar:
+                for member in tar.getmembers():
+                    if not member.isfile():
+                        continue
+                    key = _base_key_from_tar_member(member.name)
+                    if key:
+                        keys.add(key)
+        except Exception as e:
+            logger.warning("Failed to scan shard {}: {}", shard_path, e)
+
+    return keys
+
+
+def append_audit_row(audit_csv: Path, row: Dict[str, Any]) -> None:
+    audit_csv.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = audit_csv.exists()
+    fieldnames = list(row.keys())
+
+    with audit_csv.open("a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists or audit_csv.stat().st_size == 0:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def build_audit_row(sample: Dict[str, Any]) -> Dict[str, Any]:
+    return json.loads(sample["json"].decode("utf-8"))
+
+
+def process_single_video_to_samples(
     video_id: str,
     indexed_rows: List[tuple[int, Dict[str, str]]],
     frame_root: Path,
     threshold: float,
     max_side: int,
-    detect_every_k: int,
-    overwrite_existing: bool,
-) -> dict:
+    aligned_size: tuple[int, int],
+    image_format: str,
+    jpeg_quality: int,
+    skip_no_face: bool,
+    processed_keys: Set[str],
+) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
     local_rows = _sort_video_rows(indexed_rows)
-    num_rows = len(local_rows)
-
-    logger.info("Processing video: {} | total_frames={}", video_id, num_rows)
-
     stats = {
-        "video_id": video_id,
-        "total_rows": num_rows,
-        "processed_detect_frames": 0,
+        "total_rows": len(local_rows),
+        "processed_frames": 0,
         "detected_frames": 0,
-        "interpolated_frames": 0,
-        "kept_existing_frames": 0,
         "missing_file": 0,
         "read_fail": 0,
         "detect_error": 0,
         "no_face": 0,
+        "missing_landmarks": 0,
+        "align_fail": 0,
+        "encode_fail": 0,
+        "written_samples": 0,
+        "skipped_no_face": 0,
+        "skipped_existing": 0,
     }
 
-    detect_indices = _build_detect_indices(num_rows=num_rows, detect_every_k=detect_every_k)
-    explicit_results: Dict[int, dict] = {}
+    samples: List[Dict[str, Any]] = []
+    pbar = tqdm(total=len(local_rows), desc=f"Frames {str(video_id)[:40]}", leave=False)
 
-    detect_pbar = tqdm(
-        total=len(detect_indices),
-        desc=f"Detect {str(video_id)[:40]}",
-        leave=False,
-    )
-
-    for local_idx in detect_indices:
-        _, row = local_rows[local_idx]
-
-        existing_bbox = _parse_existing_bbox(row)
-        if existing_bbox is not None and not overwrite_existing:
-            explicit_results[local_idx] = {
-                "bbox": existing_bbox,
-                "num_faces": int(row.get("num_faces", "1") or 1),
-                "confidence": float(row.get("face_confidence", "1.0") or 1.0),
-                "source": "existing",
-            }
-            stats["kept_existing_frames"] += 1
-            detect_pbar.update(1)
+    for _, row in local_rows:
+        sample_key = build_sample_key(row)
+        if sample_key in processed_keys:
+            stats["skipped_existing"] += 1
+            pbar.update(1)
             continue
 
         rel_path = row.get("frame_path", "")
         image_path = frame_root / rel_path
 
-        num_faces, confidence, bbox, status = detect_face_on_image(
-            image_path=image_path,
+        image, load_status = load_image(image_path)
+        if load_status == "missing_file":
+            stats["processed_frames"] += 1
+            stats["missing_file"] += 1
+            pbar.update(1)
+            continue
+
+        if load_status == "read_fail":
+            stats["processed_frames"] += 1
+            stats["read_fail"] += 1
+            pbar.update(1)
+            continue
+
+        num_faces, confidence, bbox, landmarks, detect_status = detect_face_on_array(
+            image=image,
             threshold=threshold,
             max_side=max_side,
         )
+        stats["processed_frames"] += 1
 
-        stats["processed_detect_frames"] += 1
-
-        if status == "ok":
-            stats["detected_frames"] += 1
-        elif status == "missing_file":
-            stats["missing_file"] += 1
-        elif status == "read_fail":
-            stats["read_fail"] += 1
-        elif status == "detect_error":
+        if detect_status == "detect_error":
             stats["detect_error"] += 1
-        elif status == "no_face":
-            stats["no_face"] += 1
-
-        explicit_results[local_idx] = {
-            "bbox": bbox,
-            "num_faces": num_faces,
-            "confidence": confidence,
-            "source": "detected",
-        }
-        detect_pbar.update(1)
-
-    detect_pbar.close()
-
-    output_rows: List[tuple[int, Dict[str, str]]] = []
-
-    valid_detect_points = [
-        idx for idx, result in explicit_results.items()
-        if result["bbox"] is not None
-    ]
-    valid_detect_points.sort()
-
-    for local_idx, (global_idx, row) in enumerate(local_rows):
-        row_copy = dict(row)
-
-        if local_idx in explicit_results:
-            result = explicit_results[local_idx]
-            _apply_row_result(
-                row=row_copy,
-                bbox=result["bbox"],
-                num_faces=result["num_faces"],
-                confidence=result["confidence"],
-                bbox_source=result["source"],
-            )
-            output_rows.append((global_idx, row_copy))
+            pbar.update(1)
             continue
 
-        left_idx = None
-        right_idx = None
+        if detect_status == "no_face" or bbox is None:
+            stats["no_face"] += 1
+            if skip_no_face:
+                stats["skipped_no_face"] += 1
+                pbar.update(1)
+                continue
+            pbar.update(1)
+            continue
 
-        for idx in reversed(valid_detect_points):
-            if idx < local_idx:
-                left_idx = idx
-                break
+        stats["detected_frames"] += 1
 
-        for idx in valid_detect_points:
-            if idx > local_idx:
-                right_idx = idx
-                break
+        aligned_img, affine_matrix, align_status = align_face_5pts(
+            image=image,
+            landmarks=landmarks,
+            output_size=aligned_size,
+        )
 
-        if left_idx is not None and right_idx is not None:
-            left = explicit_results[left_idx]
-            right = explicit_results[right_idx]
-            interp_bbox = _interpolate_bbox(
-                left_idx=left_idx,
-                left_bbox=left["bbox"],
-                right_idx=right_idx,
-                right_bbox=right["bbox"],
-                target_idx=local_idx,
+        if align_status == "missing_landmarks":
+            stats["missing_landmarks"] += 1
+            pbar.update(1)
+            continue
+
+        if align_status != "ok" or aligned_img is None or affine_matrix is None:
+            stats["align_fail"] += 1
+            pbar.update(1)
+            continue
+
+        try:
+            image_bytes = encode_image_to_bytes(
+                image=aligned_img,
+                image_format=image_format,
+                jpeg_quality=jpeg_quality,
             )
-            interp_conf = min(left["confidence"], right["confidence"])
-            _apply_row_result(
-                row=row_copy,
-                bbox=interp_bbox,
-                num_faces=1,
-                confidence=interp_conf,
-                bbox_source="interpolated",
-            )
-            stats["interpolated_frames"] += 1
-        elif left_idx is not None:
-            left = explicit_results[left_idx]
-            _apply_row_result(
-                row=row_copy,
-                bbox=left["bbox"],
-                num_faces=1 if left["bbox"] else 0,
-                confidence=left["confidence"],
-                bbox_source="propagated_left",
-            )
-            if left["bbox"] is not None:
-                stats["interpolated_frames"] += 1
-        elif right_idx is not None:
-            right = explicit_results[right_idx]
-            _apply_row_result(
-                row=row_copy,
-                bbox=right["bbox"],
-                num_faces=1 if right["bbox"] else 0,
-                confidence=right["confidence"],
-                bbox_source="propagated_right",
-            )
-            if right["bbox"] is not None:
-                stats["interpolated_frames"] += 1
-        else:
-            _apply_row_result(
-                row=row_copy,
-                bbox=None,
-                num_faces=0,
-                confidence=0.0,
-                bbox_source="no_valid_detection",
-            )
+        except Exception as e:
+            logger.warning("Encode failed on {}: {}", image_path, e)
+            stats["encode_fail"] += 1
+            pbar.update(1)
+            continue
 
-        output_rows.append((global_idx, row_copy))
+        out_h, out_w = aligned_img.shape[:2]
+        label_id = _safe_label_id(row)
 
-    logger.info(
-        "Done video: {} | total={} | detect_processed={} | detected={} | interpolated={} | no_face={} | detect_error={}",
-        video_id,
-        stats["total_rows"],
-        stats["processed_detect_frames"],
-        stats["detected_frames"],
-        stats["interpolated_frames"],
-        stats["no_face"],
-        stats["detect_error"],
-    )
+        metadata = {
+            "key": sample_key,
+            "video_id": video_id,
+            "frame_path": rel_path,
+            "category": row.get("category", ""),
+            "video_name": row.get("video_name", ""),
+            "label": row.get("label", ""),
+            "binary_label": row.get("binary_label", ""),
+            "frame_number": row.get("frame_number", ""),
+            "original_frame_index": row.get("original_frame_index", ""),
+            "timestamp": row.get("timestamp", ""),
+            "width": row.get("width", ""),
+            "height": row.get("height", ""),
+            "face_detected": 1,
+            "num_faces": num_faces,
+            "face_confidence": confidence,
+            "bbox_x1": int(bbox[0]),
+            "bbox_y1": int(bbox[1]),
+            "bbox_x2": int(bbox[2]),
+            "bbox_y2": int(bbox[3]),
+            "landmarks": landmarks,
+            "alignment_mode": "similarity_5pts",
+            "align_status": align_status,
+            "aligned_width": int(out_w),
+            "aligned_height": int(out_h),
+            "aligned_size": [int(aligned_size[0]), int(aligned_size[1])],
+            "affine_matrix": affine_matrix.tolist(),
+            "image_format": image_format,
+        }
 
-    return {
-        "video_id": video_id,
-        "rows": output_rows,
-        "stats": stats,
-    }
+        sample: Dict[str, Any] = {
+            "__key__": sample_key,
+            "json": json.dumps(metadata, ensure_ascii=False).encode("utf-8"),
+        }
+
+        if image_format.lower() in {".jpg", ".jpeg"}:
+            sample["jpg"] = image_bytes
+        elif image_format.lower() == ".png":
+            sample["png"] = image_bytes
+
+        if label_id in {0, 1}:
+            sample["cls"] = str(label_id).encode("utf-8")
+
+        samples.append(sample)
+        stats["written_samples"] += 1
+        pbar.update(1)
+
+    pbar.close()
+    return samples, stats
 
 
-def update_metadata_with_bboxes_sequential(
+def run_pipeline(
     metadata_csv: Path,
     frame_root: Path,
-    threshold: float,
+    output_dir: Path,
     category: Optional[str],
-    overwrite_existing: bool,
-    limit: Optional[int],
+    threshold: float,
     max_side: int,
-    detect_every_k: int,
-) -> Path:
+    aligned_size: tuple[int, int],
+    image_format: str,
+    jpeg_quality: int,
+    shard_maxcount: int,
+    shard_maxsize: int,
+    limit: Optional[int],
+    skip_no_face: bool,
+    audit_csv: Optional[Path],
+) -> None:
     if not metadata_csv.exists():
         raise FileNotFoundError(f"Metadata CSV not found: {metadata_csv}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     with metadata_csv.open("r", encoding="utf-8", newline="") as src:
         reader = csv.DictReader(src)
         if reader.fieldnames is None:
             raise RuntimeError("Metadata CSV has no header")
-        fieldnames = list(reader.fieldnames)
-
-        for col in NEW_COLUMNS:
-            if col not in fieldnames:
-                fieldnames.append(col)
-
         all_rows = list(reader)
 
-    # 'rows' is the subset to process; global_idx still maps into all_rows
     rows = all_rows[:limit] if limit is not None else all_rows
-
     grouped = _group_rows_by_video(rows=rows, category_filter=category)
     video_items = list(grouped.items())
 
     if not video_items:
         raise RuntimeError("No matching rows/videos found to process.")
 
-    logger.info("Total rows in CSV: {}", len(all_rows))
-    if limit is not None:
-        logger.info("Processing limited to first {} rows", limit)
-    logger.info("Total videos to process: {}", len(video_items))
-    logger.info("detect_every_k: {}", detect_every_k)
-    logger.info("max_side: {}", max_side)
+    start_shard = infer_start_shard(output_dir)
 
-    # Size by all_rows so unprocessed rows are preserved when writing back
-    updated_rows: List[Optional[Dict[str, str]]] = [None] * len(all_rows)
+    processed_keys = load_processed_keys_from_audit(audit_csv)
+    if processed_keys:
+        logger.info("Loaded {} processed keys from audit CSV", len(processed_keys))
+    else:
+        logger.info("No usable audit CSV found for resume")
+
+    shard_processed_keys = load_processed_keys_from_existing_shards(output_dir)
+    if shard_processed_keys:
+        logger.info("Loaded {} processed keys from existing shards", len(shard_processed_keys))
+
+    processed_keys |= shard_processed_keys
+
+    logger.info("Total rows loaded: {}", len(rows))
+    logger.info("Total videos: {}", len(video_items))
+    logger.info("Output dir: {}", output_dir)
+    logger.info("max_side: {}", max_side)
+    logger.info("aligned_size: {}", aligned_size)
+    logger.info("image_format: {}", image_format)
+    logger.info("skip_no_face: {}", skip_no_face)
+    logger.info("Resume start_shard: {}", start_shard)
+    logger.info("Total processed keys for resume: {}", len(processed_keys))
+
+    shard_pattern = str(output_dir / "shard-%06d.tar")
 
     total_stats = {
         "videos": 0,
-        "rows": 0,
-        "processed_detect_frames": 0,
+        "total_rows": 0,
+        "processed_frames": 0,
         "detected_frames": 0,
-        "interpolated_frames": 0,
-        "kept_existing_frames": 0,
         "missing_file": 0,
         "read_fail": 0,
         "detect_error": 0,
         "no_face": 0,
+        "missing_landmarks": 0,
+        "align_fail": 0,
+        "encode_fail": 0,
+        "written_samples": 0,
+        "skipped_no_face": 0,
+        "skipped_existing": 0,
     }
 
-    video_pbar = tqdm(total=len(video_items), desc="Processing videos")
+    with ShardWriter(
+        shard_pattern,
+        maxcount=shard_maxcount,
+        maxsize=shard_maxsize,
+        start_shard=start_shard,
+    ) as sink:
+        video_pbar = tqdm(total=len(video_items), desc="Videos")
 
-    for video_id, indexed_rows in video_items:
-        result = _process_single_video(
-            video_id=video_id,
-            indexed_rows=indexed_rows,
-            frame_root=frame_root,
-            threshold=threshold,
-            max_side=max_side,
-            detect_every_k=detect_every_k,
-            overwrite_existing=overwrite_existing,
-        )
+        for video_id, indexed_rows in video_items:
+            samples, stats = process_single_video_to_samples(
+                video_id=video_id,
+                indexed_rows=indexed_rows,
+                frame_root=frame_root,
+                threshold=threshold,
+                max_side=max_side,
+                aligned_size=aligned_size,
+                image_format=image_format,
+                jpeg_quality=jpeg_quality,
+                skip_no_face=skip_no_face,
+                processed_keys=processed_keys,
+            )
 
-        video_pbar.update(1)
+            for sample in samples:
+                sink.write(sample)
+                processed_keys.add(sample["__key__"])
 
-        stats = result["stats"]
-        total_stats["videos"] += 1
-        total_stats["rows"] += stats["total_rows"]
-        total_stats["processed_detect_frames"] += stats["processed_detect_frames"]
-        total_stats["detected_frames"] += stats["detected_frames"]
-        total_stats["interpolated_frames"] += stats["interpolated_frames"]
-        total_stats["kept_existing_frames"] += stats["kept_existing_frames"]
-        total_stats["missing_file"] += stats["missing_file"]
-        total_stats["read_fail"] += stats["read_fail"]
-        total_stats["detect_error"] += stats["detect_error"]
-        total_stats["no_face"] += stats["no_face"]
+                if audit_csv is not None:
+                    append_audit_row(audit_csv, build_audit_row(sample))
 
-        for global_idx, row in result["rows"]:
-            updated_rows[global_idx] = row
+            total_stats["videos"] += 1
+            total_stats["total_rows"] += stats["total_rows"]
+            total_stats["processed_frames"] += stats["processed_frames"]
+            total_stats["detected_frames"] += stats["detected_frames"]
+            total_stats["missing_file"] += stats["missing_file"]
+            total_stats["read_fail"] += stats["read_fail"]
+            total_stats["detect_error"] += stats["detect_error"]
+            total_stats["no_face"] += stats["no_face"]
+            total_stats["missing_landmarks"] += stats["missing_landmarks"]
+            total_stats["align_fail"] += stats["align_fail"]
+            total_stats["encode_fail"] += stats["encode_fail"]
+            total_stats["written_samples"] += stats["written_samples"]
+            total_stats["skipped_no_face"] += stats["skipped_no_face"]
+            total_stats["skipped_existing"] += stats["skipped_existing"]
 
-    video_pbar.close()
+            logger.info(
+                "Done video={} | rows={} | written={} | detected={} | no_face={} | skipped_existing={} | missing_landmarks={} | align_fail={}",
+                video_id,
+                stats["total_rows"],
+                stats["written_samples"],
+                stats["detected_frames"],
+                stats["no_face"],
+                stats["skipped_existing"],
+                stats["missing_landmarks"],
+                stats["align_fail"],
+            )
 
-    # Fill every slot that was not touched (other categories or beyond --limit)
-    for idx in range(len(all_rows)):
-        if updated_rows[idx] is None:
-            updated_rows[idx] = dict(all_rows[idx])
+            video_pbar.update(1)
 
-    final_rows: List[Dict[str, str]] = []
-    for idx, row in enumerate(updated_rows):
-        if row is None:
-            raise RuntimeError(f"Missing processed row at index {idx}")
-        final_rows.append(row)
+        video_pbar.close()
 
-    temp_csv = metadata_csv.with_suffix(".tmp.csv")
-    with temp_csv.open("w", encoding="utf-8", newline="") as dst:
-        writer = csv.DictWriter(dst, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in final_rows:
-            writer.writerow(row)
-
-    backup_csv = metadata_csv.with_suffix(settings.FACE_DETECTION_BACKUP_SUFFIX)
-    if backup_csv.exists():
-        backup_csv.unlink()
-    metadata_csv.replace(backup_csv)
-    temp_csv.replace(metadata_csv)
-
-    logger.info("Metadata updated: {}", metadata_csv)
-    logger.info("Backup created: {}", backup_csv)
-    logger.info("Videos processed: {}", total_stats["videos"])
-    logger.info("Rows written: {}", total_stats["rows"])
-    logger.info("Detect frames actually processed: {}", total_stats["processed_detect_frames"])
-    logger.info("Frames with explicit detection: {}", total_stats["detected_frames"])
-    logger.info("Frames filled by interpolation/propagation: {}", total_stats["interpolated_frames"])
-    logger.info("Frames kept from existing bbox: {}", total_stats["kept_existing_frames"])
-    logger.info("Missing file: {}", total_stats["missing_file"])
-    logger.info("Read fail: {}", total_stats["read_fail"])
-    logger.info("Detect error: {}", total_stats["detect_error"])
-    logger.info("No face: {}", total_stats["no_face"])
-
-    return metadata_csv
+    logger.info("=== FINAL SUMMARY ===")
+    for k, v in total_stats.items():
+        logger.info("{}: {}", k, v)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="RetinaFace detection with detect-every-K and resize-before-detect (sequential version)"
+        description="RetinaFace detect all frames + 5-point align + write WebDataset shards with resume support"
     )
     parser.add_argument(
         "--metadata-csv",
@@ -594,10 +756,16 @@ def parse_args() -> argparse.Namespace:
         help="Root directory containing extracted frame folders",
     )
     parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=str(settings.CROP_DATA_DIR),
+        help="Directory to store output .tar shards",
+    )
+    parser.add_argument(
         "--category",
         type=str,
         default=None,
-        help="Only process one category (e.g. NeuralTextures)",
+        help="Only process one category",
     )
     parser.add_argument(
         "--threshold",
@@ -606,15 +774,10 @@ def parse_args() -> argparse.Namespace:
         help="RetinaFace confidence threshold",
     )
     parser.add_argument(
-        "--overwrite-existing",
-        action="store_true",
-        help="Re-run detection even when bbox columns already have data",
-    )
-    parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="Only load/process first N rows from CSV for quick testing",
+        help="Only process first N rows for testing",
     )
     parser.add_argument(
         "--max-side",
@@ -623,10 +786,52 @@ def parse_args() -> argparse.Namespace:
         help="Resize image before detection so longest side <= max-side",
     )
     parser.add_argument(
-        "--detect-every-k",
+        "--aligned-width",
         type=int,
-        default=5,
-        help="Run face detection every K frames within each video, then interpolate bbox for intermediate frames",
+        default=224,
+        help="Output aligned face width",
+    )
+    parser.add_argument(
+        "--aligned-height",
+        type=int,
+        default=224,
+        help="Output aligned face height",
+    )
+    parser.add_argument(
+        "--image-format",
+        type=str,
+        default=".jpg",
+        choices=[".jpg", ".jpeg", ".png"],
+        help="Encoded image format stored inside shard",
+    )
+    parser.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=95,
+        help="JPEG quality if using jpg/jpeg output",
+    )
+    parser.add_argument(
+        "--shard-maxcount",
+        type=int,
+        default=10000,
+        help="Maximum samples per shard",
+    )
+    parser.add_argument(
+        "--shard-maxsize",
+        type=int,
+        default=2_000_000_000,
+        help="Maximum bytes per shard",
+    )
+    parser.add_argument(
+        "--skip-no-face",
+        action="store_true",
+        help="Skip frames with no detected face",
+    )
+    parser.add_argument(
+        "--audit-csv",
+        type=str,
+        default=str(settings.AUDIT_FILE),
+        help="Optional audit CSV path",
     )
     return parser.parse_args()
 
@@ -638,15 +843,21 @@ def main() -> None:
 
     args = parse_args()
 
-    update_metadata_with_bboxes_sequential(
+    run_pipeline(
         metadata_csv=Path(args.metadata_csv),
         frame_root=Path(args.frame_root),
-        threshold=args.threshold,
+        output_dir=Path(args.output_dir),
         category=args.category,
-        overwrite_existing=args.overwrite_existing,
-        limit=args.limit,
+        threshold=args.threshold,
         max_side=args.max_side,
-        detect_every_k=args.detect_every_k,
+        aligned_size=(args.aligned_width, args.aligned_height),
+        image_format=args.image_format,
+        jpeg_quality=args.jpeg_quality,
+        shard_maxcount=args.shard_maxcount,
+        shard_maxsize=args.shard_maxsize,
+        limit=args.limit,
+        skip_no_face=args.skip_no_face,
+        audit_csv=Path(args.audit_csv) if args.audit_csv else None,
     )
 
 
