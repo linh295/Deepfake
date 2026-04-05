@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     CROP_DATA_DIR: pathlib.Path = ROOT_DIR / "crop_data"
     AUDIT_FILE: pathlib.Path = ROOT_DIR / "audit" / "face_detection_audit.csv"
     MODEL_DIR: pathlib.Path = ROOT_DIR / "models"
+    FIGURE_DIR: pathlib.Path = ROOT_DIR / "figures"
     
     # Frame extraction settings
     TARGET_FPS: int = 5
