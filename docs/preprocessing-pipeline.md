@@ -17,7 +17,7 @@ Script:
 Purpose:
 - scan the dataset directory
 - collect FPS and frame counts
-- assign deterministic `train/val/test` splits
+- assign deterministic `train/val/test` splits balanced within each category
 
 Example:
 
@@ -37,6 +37,7 @@ Purpose:
 - read `videos_master.csv`
 - extract frames at a target FPS
 - keep split information on every frame row
+- resume by default using existing frames plus `frame_extraction_audit.csv`
 
 Examples:
 
@@ -44,6 +45,12 @@ Extract only training data:
 
 ```bash
 python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train
+```
+
+Force a clean rerun without resume:
+
+```bash
+python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train --no-resume
 ```
 
 Extract one category only:
@@ -55,6 +62,7 @@ python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv -
 Main outputs:
 - `frame_data/<category>/<video_name>/*.jpg`
 - `frame_data/frame_extraction_metadata.csv`
+- `frame_data/frame_extraction_audit.csv`
 
 ## 3. Detect Faces and Build Frame Shards
 
@@ -104,6 +112,7 @@ Purpose:
 - read aligned frame shards
 - build fixed-length clips
 - store RGB clips and frame-difference clips
+- use canonical frame-shard `video_id` for clip grouping and keys
 
 Example:
 
@@ -111,8 +120,19 @@ Example:
 python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split train
 ```
 
+If the target split output already has clip shards, rerun with `--overwrite` to rebuild it cleanly:
+
+```bash
+python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split train --overwrite
+```
+
 Main outputs:
 - `clip_data/<split>/shard-*.tar`
+
+Important behavior:
+
+- clip grouping/keying uses canonical frame-shard `video_id`
+- reruns fail fast on existing split shards unless `--overwrite` is provided
 
 ## Recommended Run Pattern
 

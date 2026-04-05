@@ -5,6 +5,7 @@ import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple
 
 import cv2
@@ -105,7 +106,7 @@ def stable_hash(value: str) -> str:
     return hashlib.md5(value.encode("utf-8")).hexdigest()
 
 
-def assign_splits(records: List[Dict[str, object]]) -> Dict[str, str]:
+def assign_splits_for_category(records: List[Dict[str, object]]) -> Dict[str, str]:
     group_weights: Dict[str, int] = {}
     for record in records:
         group_key = str(record["_split_group"])
@@ -132,6 +133,19 @@ def assign_splits(records: List[Dict[str, object]]) -> Dict[str, str]:
         )
         split_by_group[group_key] = split
         counts[split] += weight
+
+    return split_by_group
+
+
+def assign_splits(records: List[Dict[str, object]]) -> Dict[str, str]:
+    split_by_group: Dict[str, str] = {}
+    records_by_category: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+
+    for record in records:
+        records_by_category[str(record["category"])].append(record)
+
+    for category_records in records_by_category.values():
+        split_by_group.update(assign_splits_for_category(category_records))
 
     return split_by_group
 

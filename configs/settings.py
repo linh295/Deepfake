@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # Frame extraction settings
     TARGET_FPS: int = 5
     FRAME_EXTRACTION_METADATA_CSV: str = "frame_extraction_metadata.csv"
+    FRAME_EXTRACTION_AUDIT_CSV: str = "frame_extraction_audit.csv"
 
     # Face detection settings
     FACE_DETECTION_THRESHOLD: float = 0.9

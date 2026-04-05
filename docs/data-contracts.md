@@ -19,6 +19,7 @@ Key columns:
 Notes:
 
 - `split` is assigned at the video level and should be treated as the source of truth for downstream split routing.
+- split assignment targets the `8:1:1` ratio within each category, subject to whole-group constraints.
 - `binary_label` uses `0` for real and `1` for fake.
 
 ## 2. `frame_extraction_metadata.csv`
@@ -147,3 +148,4 @@ Notes:
 - `rgb.npy` stores shape `(T, C, H, W)`.
 - `diff.npy` stores frame differences across consecutive frames.
 - `source_keys` can be used to trace the clip back to frame-level shard samples.
+- clip `key` is derived from canonical frame-shard `video_id`, not `video_name`.

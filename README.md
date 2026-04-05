@@ -5,7 +5,7 @@ This repository builds a training-ready deepfake dataset from raw FaceForensics+
 The current pipeline is organized around four stages:
 
 1. `preprocessing/metadata_level.py`
-   Builds `videos_master.csv` with video-level metadata and deterministic `train/val/test` splits.
+   Builds `videos_master.csv` with video-level metadata and deterministic `train/val/test` splits balanced within each category.
 2. `preprocessing/frame_extractor.py`
    Extracts frames and writes `frame_extraction_metadata.csv`.
 3. `preprocessing/face_detection.py`
@@ -46,6 +46,8 @@ Extract frames for a single split:
 python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train
 ```
 
+Resume is enabled by default for frame extraction. Use `--no-resume` to force a clean rerun.
+
 Build aligned face shards for the same split:
 
 ```bash
@@ -66,6 +68,8 @@ Repeat the frame, face, and clip stages for `val` and `test` when running the fu
   Video-level manifest with deterministic split assignment.
 - `frame_data/frame_extraction_metadata.csv`
   Frame-level manifest produced by `frame_extractor.py`.
+- `frame_data/frame_extraction_audit.csv`
+  Resume audit for completed videos in `frame_extractor.py`.
 - `crop_data/<split>/shard-*.tar`
   Frame-level WebDataset shards containing aligned face crops.
 - `clip_data/<split>/shard-*.tar`

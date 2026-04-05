@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shutil
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -135,6 +136,22 @@ def _flush_sample_parts(
     )
 
 
+def _canonical_video_id(frame: FrameSample) -> str:
+    video_id = _normalize_text(frame.video_id)
+    if video_id:
+        return video_id.replace("\\", "/")
+
+    category = _normalize_text(frame.category)
+    video_name = _normalize_text(frame.video_name)
+    if category and video_name:
+        return f"{category}/{video_name}".replace("\\", "/")
+    return video_name or "unknown_video"
+
+
+def _clip_key_video_path(frame: FrameSample) -> str:
+    return _canonical_video_id(frame)
+
+
 def iter_frame_samples_from_shards(split_input_dir: Path, fallback_split: Optional[str]) -> Iterator[FrameSample]:
     shard_paths = sorted(split_input_dir.glob("shard-*.tar"))
     for shard_path in tqdm(shard_paths, desc=f"Read shards {split_input_dir.name}", leave=False):
@@ -195,7 +212,7 @@ def _npy_bytes(array: np.ndarray) -> bytes:
 
 
 def _video_group_key(frame: FrameSample) -> Tuple[str, str, str]:
-    return (frame.split, frame.category, frame.video_name or frame.video_id)
+    return (frame.split, frame.category, _canonical_video_id(frame))
 
 
 def build_clips_for_video(
@@ -226,8 +243,9 @@ def build_clips_for_video(
         diff_clip = _make_frame_difference(rgb_clip)
 
         first = clip_frames[0]
-        split, category, video_name = _video_group_key(first)
-        clip_key = f"{category}/{video_name}/clip_{clip_id:06d}"
+        split, category, _ = _video_group_key(first)
+        clip_video_path = _clip_key_video_path(first)
+        clip_key = f"{clip_video_path}/clip_{clip_id:06d}"
 
         center_candidates = [2, 3, 4, 5] if clip_len == 8 else list(
             range(max(0, clip_len // 2 - 1), min(clip_len, clip_len // 2 + 2))
@@ -274,6 +292,40 @@ def build_clips_for_video(
 
     return samples
 
+def _assert_split_output_is_writable(split_output_dir: Path, overwrite: bool) -> None:
+    shard_paths = sorted(split_output_dir.glob("shard-*.tar"))
+    if not shard_paths:
+        split_output_dir.mkdir(parents=True, exist_ok=True)
+        return
+
+    if not overwrite:
+        raise RuntimeError(
+            f"Output already contains shards for split at {split_output_dir}. "
+            "Delete the split output or rerun with --overwrite."
+        )
+
+    shutil.rmtree(split_output_dir)
+    split_output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _flush_video_frames(
+    *,
+    sink: Any,
+    frames: List[FrameSample],
+    clip_len: int,
+    frame_stride: int,
+    clip_stride: int,
+) -> int:
+    clip_samples = build_clips_for_video(
+        frames,
+        clip_len=clip_len,
+        frame_stride=frame_stride,
+        clip_stride=clip_stride,
+    )
+    for sample in clip_samples:
+        sink.write(sample)
+    return len(clip_samples)
+
 
 def process_split(
     split: str,
@@ -284,8 +336,9 @@ def process_split(
     clip_len: int,
     frame_stride: int,
     clip_stride: int,
+    overwrite: bool,
 ) -> None:
-    split_output_dir.mkdir(parents=True, exist_ok=True)
+    _assert_split_output_is_writable(split_output_dir, overwrite=overwrite)
 
     total_frames = 0
     total_videos = 0
@@ -294,44 +347,53 @@ def process_split(
 
     shard_pattern = str(split_output_dir / "shard-%06d.tar")
     with ShardWriter(shard_pattern, maxcount=shard_maxcount, maxsize=shard_maxsize) as sink:
-        current_group: Optional[Tuple[str, str, str]] = None
+        current_video_key: Optional[Tuple[str, str, str]] = None
         current_video_frames: List[FrameSample] = []
+        completed_video_keys: set[Tuple[str, str, str]] = set()
 
         for frame in iter_frame_samples_from_shards(split_input_dir, fallback_split=split):
             total_frames += 1
-            group = _video_group_key(frame)
+            group_key = _video_group_key(frame)
 
-            if current_group is not None and group != current_group:
+            if current_video_key is None:
+                current_video_key = group_key
+            elif group_key != current_video_key:
                 total_videos += 1
-                clip_samples = build_clips_for_video(
-                    current_video_frames,
+                clip_count = _flush_video_frames(
+                    sink=sink,
+                    frames=current_video_frames,
                     clip_len=clip_len,
                     frame_stride=frame_stride,
                     clip_stride=clip_stride,
                 )
-                if not clip_samples:
+                if clip_count == 0:
                     dropped_videos += 1
-                for sample in clip_samples:
-                    sink.write(sample)
-                total_clips += len(clip_samples)
+                total_clips += clip_count
+                completed_video_keys.add(current_video_key)
                 current_video_frames = []
+                current_video_key = group_key
 
-            current_group = group
+            if group_key in completed_video_keys:
+                raise RuntimeError(
+                    f"Input shards are not contiguous by video for split={split}: "
+                    f"{group_key[2]} reappeared after it was already flushed. "
+                    "Rebuild the frame shards from face_detection or keep shard ordering grouped by video."
+                )
+
             current_video_frames.append(frame)
 
-        if current_video_frames:
+        if current_video_key is not None:
             total_videos += 1
-            clip_samples = build_clips_for_video(
-                current_video_frames,
+            clip_count = _flush_video_frames(
+                sink=sink,
+                frames=current_video_frames,
                 clip_len=clip_len,
                 frame_stride=frame_stride,
                 clip_stride=clip_stride,
             )
-            if not clip_samples:
+            if clip_count == 0:
                 dropped_videos += 1
-            for sample in clip_samples:
-                sink.write(sample)
-            total_clips += len(clip_samples)
+            total_clips += clip_count
 
     logger.info(
         "Split={} | frames={} | videos={} | clips={} | dropped_videos={}",
@@ -394,6 +456,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-stride", type=int, default=4, help="Clip sliding-window stride")
     parser.add_argument("--shard-maxcount", type=int, default=2000, help="Maximum clips per output shard")
     parser.add_argument("--shard-maxsize", type=int, default=2_000_000_000, help="Maximum bytes per output shard")
+    parser.add_argument("--overwrite", action="store_true", help="Delete existing output shards for the target split before rebuilding")
     return parser.parse_args()
 
 
@@ -410,6 +473,7 @@ def main() -> None:
     logger.info("Clip len: {}", args.clip_len)
     logger.info("Frame stride: {}", args.frame_stride)
     logger.info("Clip stride: {}", args.clip_stride)
+    logger.info("Overwrite: {}", args.overwrite)
 
     for split_name, split_input_dir in splits:
         split_output_dir = output_dir / split_name
@@ -422,6 +486,7 @@ def main() -> None:
             clip_len=args.clip_len,
             frame_stride=args.frame_stride,
             clip_stride=args.clip_stride,
+            overwrite=args.overwrite,
         )
 
 
