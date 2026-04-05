@@ -15,6 +15,12 @@ if TYPE_CHECKING:
     from training.train import TrainConfig
 
 
+_TQDM_BAR_FORMAT = (
+    "{l_bar}{bar}| {n_fmt}/{total_fmt} "
+    "[{elapsed}<{remaining}, {rate_fmt}{postfix}]"
+)
+
+
 def train_one_epoch(
     model: SpatioTemporalDeepfakeDetector,
     loader: Iterable[dict[str, Any]],
@@ -24,6 +30,8 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     cfg: "TrainConfig",
+    total_batches: int | None = None,
+    stage_label: str | None = None,
 ) -> dict[str, float]:
     model.train()
     running_loss = 0.0
@@ -31,7 +39,13 @@ def train_one_epoch(
     all_probs: list[torch.Tensor] = []
     all_labels: list[torch.Tensor] = []
 
-    pbar = tqdm(loader, desc=f"Train {epoch}")
+    pbar = tqdm(
+        loader,
+        total=total_batches,
+        desc=stage_label or f"Train {epoch}",
+        dynamic_ncols=True,
+        bar_format=_TQDM_BAR_FORMAT,
+    )
     for step, batch in enumerate(pbar, start=1):
         batch = move_batch_to_device(batch, device)
         optimizer.zero_grad(set_to_none=True)
@@ -54,7 +68,10 @@ def train_one_epoch(
         all_labels.append(batch["label"].detach().cpu())
 
         if step % cfg.log_every == 0 or step == 1:
-            pbar.set_postfix(loss=f"{running_loss / num_steps:.4f}")
+            pbar.set_postfix(
+                loss=f"{running_loss / num_steps:.4f}",
+                lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+            )
 
     return finalize_epoch_metrics(
         running_loss=running_loss,
@@ -73,6 +90,8 @@ def validate_one_epoch(
     device: torch.device,
     epoch: int,
     cfg: "TrainConfig",
+    total_batches: int | None = None,
+    stage_label: str | None = None,
 ) -> dict[str, float]:
     model.eval()
     running_loss = 0.0
@@ -80,7 +99,13 @@ def validate_one_epoch(
     all_probs: list[torch.Tensor] = []
     all_labels: list[torch.Tensor] = []
 
-    pbar = tqdm(loader, desc=f"Val {epoch}")
+    pbar = tqdm(
+        loader,
+        total=total_batches,
+        desc=stage_label or f"Val {epoch}",
+        dynamic_ncols=True,
+        bar_format=_TQDM_BAR_FORMAT,
+    )
     for batch in pbar:
         batch = move_batch_to_device(batch, device)
         with autocast(device_type=device.type, enabled=cfg.use_amp and device.type == "cuda"):

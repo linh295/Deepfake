@@ -94,6 +94,40 @@ class DatasetLoaderTestCase(unittest.TestCase):
         self.assertEqual(float(output["label"]), 1.0)
         self.assertTrue(torch_all_between_zero_and_one(output["temporal"].numpy()))
 
+    def test_invert_binary_labels_flips_cls_value(self) -> None:
+        dataset = ClipWebDataset(ClipDatasetConfig(shard_pattern="dummy", invert_binary_labels=True))
+        sample = _sample_bytes(clip_len=8)
+
+        output = dataset._process_sample(sample)
+
+        self.assertEqual(float(output["label"]), 0.0)
+
+    def test_invert_binary_labels_flips_binary_label_metadata(self) -> None:
+        dataset = ClipWebDataset(ClipDatasetConfig(shard_pattern="dummy", invert_binary_labels=True))
+        sample = _sample_bytes(
+            clip_len=8,
+            metadata={"binary_label": 0},
+        )
+        sample.pop("cls")
+
+        output = dataset._process_sample(sample)
+
+        self.assertEqual(float(output["label"]), 1.0)
+
+    def test_invert_binary_labels_flips_string_real_fake_labels(self) -> None:
+        dataset = ClipWebDataset(ClipDatasetConfig(shard_pattern="dummy", invert_binary_labels=True))
+
+        real_sample = _sample_bytes(clip_len=8, metadata={"label": "real", "binary_label": None})
+        real_sample.pop("cls")
+        fake_sample = _sample_bytes(clip_len=8, metadata={"label": "fake", "binary_label": None})
+        fake_sample.pop("cls")
+
+        real_output = dataset._process_sample(real_sample)
+        fake_output = dataset._process_sample(fake_sample)
+
+        self.assertEqual(float(real_output["label"]), 1.0)
+        self.assertEqual(float(fake_output["label"]), 0.0)
+
     def test_training_prefers_center_candidates_from_metadata(self) -> None:
         dataset = ClipWebDataset(
             ClipDatasetConfig(

@@ -18,6 +18,7 @@ class ClipDatasetConfig:
     shard_pattern: str
     clip_len: int = 8
     diff_len: int | None = None
+    invert_binary_labels: bool = False
     spatial_candidate_indices: tuple[int, ...] = (2, 3, 4, 5)
     training: bool = True
     shuffle_buffer: int = 1000
@@ -113,23 +114,31 @@ class ClipWebDataset:
         return valid_candidates[len(valid_candidates) // 2]
 
     def _extract_label(self, sample: Dict[str, Any], metadata: Dict[str, Any]) -> float:
+        label_value: float | None = None
         if "cls" in sample and sample["cls"] is not None:
             raw = sample["cls"]
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
-            return float(int(str(raw).strip()))
+            label_value = float(int(str(raw).strip()))
 
-        binary_label = metadata.get("binary_label")
-        if binary_label in {0, 1, "0", "1"}:
-            return float(int(binary_label))
+        if label_value is None:
+            binary_label = metadata.get("binary_label")
+            if binary_label in {0, 1, "0", "1"}:
+                label_value = float(int(binary_label))
 
-        label = str(metadata.get("label", "")).strip().lower()
-        if label in {"real", "original"}:
-            return 0.0
-        if label == "fake":
-            return 1.0
+        if label_value is None:
+            label = str(metadata.get("label", "")).strip().lower()
+            if label in {"real", "original"}:
+                label_value = 0.0
+            elif label == "fake":
+                label_value = 1.0
 
-        raise ValueError("Could not infer label from sample.")
+        if label_value is None:
+            raise ValueError("Could not infer label from sample.")
+
+        if self.config.invert_binary_labels:
+            return 1.0 - label_value
+        return label_value
 
     def _normalize_rgb(self, tensor: torch.Tensor) -> torch.Tensor:
         # ImageNet normalization for spatial RGB branch.

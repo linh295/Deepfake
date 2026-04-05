@@ -25,6 +25,7 @@ def save_checkpoint(
     best_selection_metric: float,
     cfg: Any,
     model_cfg: ModelConfig,
+    class_balance_info: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -38,6 +39,7 @@ def save_checkpoint(
             "best_selection_metric": best_selection_metric,
             "train_config": asdict(cfg),
             "model_config": asdict(model_cfg),
+            "class_balance": class_balance_info,
             "rng_state": capture_rng_state(),
         },
         path,

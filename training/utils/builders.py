@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataloader.dataset import ClipDatasetConfig, build_clip_dataloader
 from training.spatio_temporal_detector import ModelConfig, SpatioTemporalDeepfakeDetector
+from training.utils.class_balance import ClassBalanceInfo
 
 if TYPE_CHECKING:
     from training.train import TrainConfig
@@ -18,6 +19,7 @@ def build_dataloaders(cfg: "TrainConfig") -> tuple[Any, Any]:
     train_ds_cfg = ClipDatasetConfig(
         shard_pattern=cfg.train_shards,
         clip_len=cfg.clip_len,
+        invert_binary_labels=cfg.invert_binary_labels,
         training=True,
         shuffle_buffer=cfg.train_shuffle_buffer,
         seed=cfg.seed,
@@ -30,6 +32,7 @@ def build_dataloaders(cfg: "TrainConfig") -> tuple[Any, Any]:
     val_ds_cfg = ClipDatasetConfig(
         shard_pattern=cfg.val_shards,
         clip_len=cfg.clip_len,
+        invert_binary_labels=cfg.invert_binary_labels,
         training=False,
         shuffle_buffer=0,
         seed=cfg.seed,
@@ -68,7 +71,19 @@ def build_model(
     return model, model_cfg
 
 
-def build_loss() -> nn.Module:
+def build_loss(
+    cfg: "TrainConfig",
+    device: torch.device,
+    class_balance_info: ClassBalanceInfo | None = None,
+) -> nn.Module:
+    if (
+        cfg.use_pos_weight
+        and cfg.auto_pos_weight
+        and class_balance_info is not None
+        and class_balance_info.effective_pos_weight is not None
+    ):
+        pos_weight = torch.tensor([class_balance_info.effective_pos_weight], dtype=torch.float32, device=device)
+        return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     return nn.BCEWithLogitsLoss()
 
 
@@ -92,4 +107,3 @@ def build_scheduler(optimizer: AdamW, cfg: "TrainConfig") -> ReduceLROnPlateau:
         threshold=cfg.scheduler_threshold,
         min_lr=cfg.scheduler_min_lr,
     )
-

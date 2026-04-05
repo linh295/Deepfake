@@ -18,7 +18,7 @@ def _load_torchvision_models():
 class SpatialResNet50(nn.Module):
     def __init__(self, pretrained: bool = True, freeze_backbone: bool = False) -> None:
         super().__init__()
-        self.freeze_backbone = freeze_backbone
+        self.freeze_backbone = False
 
         tvm = _load_torchvision_models()
         weights = tvm.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
@@ -37,15 +37,25 @@ class SpatialResNet50(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
         self.out_dim = 2048
 
-        if freeze_backbone:
-            for param in self.parameters():
-                param.requires_grad = False
-            self._set_frozen_batchnorm_eval()
+        self.set_trainable(not freeze_backbone)
 
     def _set_frozen_batchnorm_eval(self) -> None:
         for module in self.modules():
             if isinstance(module, nn.BatchNorm2d):
                 module.eval()
+
+    def set_trainable(self, trainable: bool) -> None:
+        self.freeze_backbone = not trainable
+        for param in self.parameters():
+            param.requires_grad = trainable
+        if self.freeze_backbone:
+            self._set_frozen_batchnorm_eval()
+
+    def freeze(self) -> None:
+        self.set_trainable(False)
+
+    def unfreeze(self) -> None:
+        self.set_trainable(True)
 
     def train(self, mode: bool = True) -> "SpatialResNet50":
         super().train(mode)

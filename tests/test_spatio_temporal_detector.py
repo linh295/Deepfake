@@ -109,6 +109,26 @@ class SpatioTemporalDetectorTestCase(unittest.TestCase):
         self.assertTrue(batch_norms)
         self.assertTrue(all(not module.training for module in batch_norms))
 
+    def test_spatial_backbone_can_freeze_and_unfreeze_at_runtime(self) -> None:
+        with mock.patch("training.spatial_resnet50._load_torchvision_models", return_value=_fake_torchvision_models()):
+            branch = SpatialResNet50(pretrained=False, freeze_backbone=False)
+
+        self.assertTrue(all(param.requires_grad for param in branch.parameters()))
+
+        branch.set_trainable(False)
+        branch.train()
+        batch_norms = [module for module in branch.modules() if isinstance(module, nn.BatchNorm2d)]
+
+        self.assertTrue(all(not param.requires_grad for param in branch.parameters()))
+        self.assertTrue(batch_norms)
+        self.assertTrue(all(not module.training for module in batch_norms))
+
+        branch.set_trainable(True)
+        branch.train()
+
+        self.assertTrue(all(param.requires_grad for param in branch.parameters()))
+        self.assertTrue(all(module.training for module in batch_norms))
+
     def test_temporal_branch_accepts_noncontiguous_input(self) -> None:
         branch = TemporalDiffCNN(pool_mode="mean")
         x = torch.randn(2, 3, 7, 32, 32).permute(0, 2, 1, 3, 4)

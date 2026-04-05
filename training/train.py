@@ -18,9 +18,12 @@ from training.utils.builders import (
     build_optimizer,
     build_scheduler,
 )
+from training.utils.class_balance import build_class_balance_info
 from training.utils.checkpointing import save_checkpoint, write_history
+from training.utils.freezing import set_spatial_branch_trainable
 from training.utils.loops import train_one_epoch, validate_one_epoch
 from training.utils.metrics import get_current_lrs, select_checkpoint_metric
+from training.utils.progress import build_progress_totals
 from training.utils.runtime import resolve_device, set_seed
 
 
@@ -37,6 +40,10 @@ class TrainConfig:
     lr_fusion: float = 1e-4
     weight_decay: float = 1e-4
     clip_len: int = 8
+    invert_binary_labels: bool = False
+    use_pos_weight: bool = True
+    auto_pos_weight: bool = True
+    max_pos_weight: float | None = None
     seed: int = 42
     device: str = "cuda"
     use_amp: bool = True
@@ -51,20 +58,25 @@ class TrainConfig:
     scheduler_patience: int = 2
     scheduler_threshold: float = 1e-4
     scheduler_min_lr: float = 0.0
+    spatial_freeze_warmup_epochs: int = 3
 
 def parse_args() -> TrainConfig:
     parser = argparse.ArgumentParser(description="Train spatio-temporal deepfake detector")
     parser.add_argument("--train-shards", type=str, required=True, help='e.g. "clip_data/train/shard-*.tar"')
     parser.add_argument("--val-shards", type=str, required=True, help='e.g. "clip_data/val/shard-*.tar"')
     parser.add_argument("--output-dir", type=str, default="artifacts/experiments/st_detector")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--lr-spatial", type=float, default=1e-5)
-    parser.add_argument("--lr-temporal", type=float, default=1e-4)
-    parser.add_argument("--lr-fusion", type=float, default=1e-4)
+    parser.add_argument("--lr-temporal", type=float, default=5e-5)
+    parser.add_argument("--lr-fusion", type=float, default=5e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--clip-len", type=int, default=8)
+    parser.add_argument("--invert-binary-labels", action="store_true")
+    parser.add_argument("--disable-pos-weight", action="store_true")
+    parser.add_argument("--disable-auto-pos-weight", action="store_true")
+    parser.add_argument("--max-pos-weight", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--disable-amp", action="store_true")
@@ -77,6 +89,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--scheduler-patience", type=int, default=2)
     parser.add_argument("--scheduler-threshold", type=float, default=1e-4)
     parser.add_argument("--scheduler-min-lr", type=float, default=0.0)
+    parser.add_argument("--spatial-freeze-warmup-epochs", type=int, default=3)
     parser.add_argument("--disable-pin-memory", action="store_true")
     parser.add_argument("--disable-persistent-workers", action="store_true")
     args = parser.parse_args()
@@ -93,6 +106,10 @@ def parse_args() -> TrainConfig:
         lr_fusion=args.lr_fusion,
         weight_decay=args.weight_decay,
         clip_len=args.clip_len,
+        invert_binary_labels=args.invert_binary_labels,
+        use_pos_weight=not args.disable_pos_weight,
+        auto_pos_weight=not args.disable_auto_pos_weight,
+        max_pos_weight=args.max_pos_weight,
         seed=args.seed,
         device=args.device,
         use_amp=not args.disable_amp,
@@ -107,6 +124,7 @@ def parse_args() -> TrainConfig:
         scheduler_patience=args.scheduler_patience,
         scheduler_threshold=args.scheduler_threshold,
         scheduler_min_lr=args.scheduler_min_lr,
+        spatial_freeze_warmup_epochs=args.spatial_freeze_warmup_epochs,
     )
 
 
@@ -123,10 +141,23 @@ def main() -> None:
     logger.info("Output dir: {}", output_dir)
     logger.info("Train shards: {}", cfg.train_shards)
     logger.info("Val shards: {}", cfg.val_shards)
+    logger.info("Invert binary labels: {}", cfg.invert_binary_labels)
 
     train_loader, val_loader = build_dataloaders(cfg)
+    progress_totals = build_progress_totals(
+        train_shards=cfg.train_shards,
+        val_shards=cfg.val_shards,
+        batch_size=cfg.batch_size,
+    )
+    class_balance_info = None
+    if cfg.use_pos_weight and cfg.auto_pos_weight:
+        class_balance_info = build_class_balance_info(
+            shard_pattern=cfg.train_shards,
+            invert_binary_labels=cfg.invert_binary_labels,
+            max_pos_weight=cfg.max_pos_weight,
+        )
     model, model_cfg = build_model(cfg, device)
-    criterion = build_loss()
+    criterion = build_loss(cfg, device, class_balance_info)
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
     scaler = GradScaler("cuda", enabled=cfg.use_amp and device.type == "cuda")
@@ -135,12 +166,57 @@ def main() -> None:
     best_selection_metric = -math.inf
     best_epoch = -1
     epochs_without_improvement = 0
-    history: dict[str, Any] = {"train": [], "val": []}
+    history: dict[str, Any] = {
+        "run": {
+            "class_balance": class_balance_info.as_dict() if class_balance_info is not None else None,
+            "use_pos_weight": cfg.use_pos_weight,
+            "auto_pos_weight": cfg.auto_pos_weight,
+        },
+        "train": [],
+        "val": [],
+    }
+
+    if class_balance_info is not None:
+        logger.info(
+            "Class balance | positive_class={} | positive_count={} | negative_count={} | raw_pos_weight={} | effective_pos_weight={}",
+            class_balance_info.positive_class_name,
+            class_balance_info.positive_count,
+            class_balance_info.negative_count,
+            class_balance_info.raw_pos_weight,
+            class_balance_info.effective_pos_weight,
+        )
+        if class_balance_info.effective_pos_weight is None:
+            logger.warning(
+                "Auto pos_weight could not be derived safely from train shards; falling back to unweighted BCEWithLogitsLoss."
+            )
 
     for epoch in range(1, cfg.epochs + 1):
+        freeze_spatial = epoch <= cfg.spatial_freeze_warmup_epochs
+        phase_name = "temporal_warmup" if freeze_spatial else "full_finetune"
+        set_spatial_branch_trainable(model, trainable=not freeze_spatial)
         epoch_start = time.time()
-        train_metrics = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, cfg)
-        val_metrics = validate_one_epoch(model, val_loader, criterion, device, epoch, cfg)
+        train_metrics = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            scaler,
+            device,
+            epoch,
+            cfg,
+            total_batches=progress_totals["train"],
+            stage_label=f"Train {epoch}/{cfg.epochs}",
+        )
+        val_metrics = validate_one_epoch(
+            model,
+            val_loader,
+            criterion,
+            device,
+            epoch,
+            cfg,
+            total_batches=progress_totals["val"],
+            stage_label=f"Val {epoch}/{cfg.epochs}",
+        )
 
         current_selection_metric, selection_metric_name = select_checkpoint_metric(val_metrics)
         scheduler.step(current_selection_metric)
@@ -164,7 +240,7 @@ def main() -> None:
         elapsed = time.time() - epoch_start
         logger.info(
             "Epoch {} | time={:.1f}s | train_loss={:.4f} train_auc={:.4f} train_acc={:.4f} | "
-            "val_loss={:.4f} val_auc={:.4f} val_acc={:.4f} | {}={:.4f} | lrs={}",
+            "val_loss={:.4f} val_auc={:.4f} val_acc={:.4f} | phase={} | {}={:.4f} | lrs={}",
             epoch,
             elapsed,
             train_metrics["loss"],
@@ -173,6 +249,7 @@ def main() -> None:
             val_metrics["loss"],
             val_metrics["auc"],
             val_metrics["accuracy"],
+            phase_name,
             selection_metric_name,
             current_selection_metric,
             current_lrs,
@@ -192,6 +269,7 @@ def main() -> None:
                 best_selection_metric,
                 cfg,
                 model_cfg,
+                class_balance_info.as_dict() if class_balance_info is not None else None,
             )
 
         if current_selection_metric > best_selection_metric:
@@ -209,6 +287,7 @@ def main() -> None:
                 best_selection_metric,
                 cfg,
                 model_cfg,
+                class_balance_info.as_dict() if class_balance_info is not None else None,
             )
             logger.info(
                 "Saved new best checkpoint at epoch {} with {}={:.4f}",
