@@ -1,11 +1,11 @@
-# Data Contracts
+# Data Contract
 
 ## 1. `videos_master.csv`
 
-Produced by:
+Được sinh bởi:
 - [metadata_level.py](../preprocessing/metadata_level.py)
 
-Key columns:
+Cột quan trọng:
 
 - `video_id`
 - `video_path`
@@ -16,18 +16,18 @@ Key columns:
 - `original_fps`
 - `num_frames`
 
-Notes:
+Ghi chú:
 
-- `split` is assigned at the video level and should be treated as the source of truth for downstream split routing.
-- split assignment targets the `8:1:1` ratio within each category, subject to whole-group constraints.
-- `binary_label` uses `0` for real and `1` for fake.
+- `split` được gán ở cấp video và nên được xem là nguồn sự thật cho việc định tuyến split ở các stage sau.
+- việc gán split nhằm mục tiêu tỷ lệ `8:1:1` trong từng category, trong giới hạn của ràng buộc nhóm nguyên.
+- `binary_label` dùng `0` cho real và `1` cho fake.
 
 ## 2. `frame_extraction_metadata.csv`
 
-Produced by:
+Được sinh bởi:
 - [frame_extractor.py](../preprocessing/frame_extractor.py)
 
-Key columns:
+Cột quan trọng:
 
 - `frame_path`
 - `video_id`
@@ -48,23 +48,23 @@ Key columns:
 - `total_video_frames`
 - `extraction_date`
 
-Notes:
+Ghi chú:
 
-- `frame_path` is relative to the frame root directory.
-- `split` must remain available because downstream stages can filter on it.
+- `frame_path` là đường dẫn tương đối so với thư mục frame root.
+- `split` phải được giữ lại vì các stage sau có thể lọc theo trường này.
 
-## 3. Face Frame Shards
+## 3. Face Frame Shard
 
-Produced by:
+Được sinh bởi:
 - [face_detection.py](../preprocessing/face_detection.py)
 
-Typical shard parts per sample:
+Thành phần thường có trong mỗi sample shard:
 
 - `json`
-- `jpg` or `png`
-- `cls` when label is known
+- `jpg` hoặc `png`
+- `cls` khi nhãn đã biết
 
-Important metadata fields inside `json`:
+Trường metadata quan trọng trong `json`:
 
 - `key`
 - `video_id`
@@ -98,26 +98,26 @@ Important metadata fields inside `json`:
 - `image_format`
 - `detect_every_k`
 
-Notes:
+Ghi chú:
 
-- `bbox_*` refers to the detected bounding box in the original image coordinates.
-- `crop_*` refers to the crop window in aligned-canvas coordinates.
-- `aligned_width` and `aligned_height` are the final output dimensions after resize.
-- `align_canvas_*` describes the larger canvas used before the final crop is resized.
+- `bbox_*` là bounding box detect được trong hệ tọa độ của ảnh gốc.
+- `crop_*` là cửa sổ crop trong hệ tọa độ của align-canvas.
+- `aligned_width` và `aligned_height` là kích thước output cuối sau resize.
+- `align_canvas_*` mô tả canvas lớn hơn được dùng trước khi crop cuối cùng bị resize.
 
-## 4. Clip Shards
+## 4. Clip Shard
 
-Produced by:
+Được sinh bởi:
 - [build_clips.py](../preprocessing/build_clips.py)
 
-Typical shard parts per sample:
+Thành phần thường có trong mỗi sample shard:
 
 - `json`
 - `rgb.npy`
 - `diff.npy`
-- `cls` when label is known
+- `cls` khi nhãn đã biết
 
-Important metadata fields inside `json`:
+Trường metadata quan trọng trong `json`:
 
 - `key`
 - `split`
@@ -143,9 +143,94 @@ Important metadata fields inside `json`:
 - `rgb_dtype`
 - `diff_dtype`
 
-Notes:
+Ghi chú:
 
-- `rgb.npy` stores shape `(T, C, H, W)`.
-- `diff.npy` stores frame differences across consecutive frames.
-- `source_keys` can be used to trace the clip back to frame-level shard samples.
-- clip `key` is derived from canonical frame-shard `video_id`, not `video_name`.
+- `rgb.npy` có shape `(T, C, H, W)`.
+- `diff.npy` lưu frame difference giữa các frame liên tiếp.
+- `source_keys` có thể được dùng để truy vết clip về sample cấp frame.
+- `key` của clip được suy ra từ `video_id` canonical của frame shard, không phải `video_name`.
+
+## 5. Hợp Đồng Dữ Liệu Của Batch Từ Dataloader
+
+Được sinh bởi:
+- [dataloader/dataset.py](../dataloader/dataset.py)
+
+Key trong batch:
+
+- `spatial`
+- `temporal`
+- `label`
+- `spatial_index`
+- `meta`
+
+Tensor shape kỳ vọng:
+
+- `spatial`: `(B, 3, H, W)`
+- `temporal`: `(B, T-1, 3, H, W)`
+- `label`: `(B,)`
+- `spatial_index`: `(B,)`
+
+Ghi chú:
+
+- `spatial` là một frame RGB được chọn từ `rgb.npy`.
+- `temporal` đến từ `diff.npy`, vì vậy chiều thời gian của nó phải bằng `clip_length - 1`.
+- `spatial` được normalize theo ImageNet mean/std.
+- `temporal` được scale về `[0, 1]` mà không dùng ImageNet normalization.
+- `meta` giữ lại JSON metadata của từng sample để debug và truy vết.
+
+## 6. Hợp Đồng Dữ Liệu Của Đầu Ra Huấn Luyện
+
+Được sinh bởi:
+- [training/train.py](../training/train.py)
+- [training/utils/checkpointing.py](../training/utils/checkpointing.py)
+
+### `history.json`
+
+Key cấp cao nhất:
+
+- `run`
+- `train`
+- `val`
+
+Các trường thường có trong `run`:
+
+- `class_balance`
+- `use_pos_weight`
+- `auto_pos_weight`
+
+Các trường thường có trong từng dòng `train` và `val`:
+
+- `epoch`
+- `loss`
+- `accuracy`
+- `f1`
+- `auc`
+
+Trường bổ sung cho validation:
+
+- `selection_metric`
+- `selection_metric_name`
+- `learning_rates`
+
+### Checkpoint `.pt`
+
+Key cấp cao nhất:
+
+- `epoch`
+- `model_state`
+- `optimizer_state`
+- `scheduler_state`
+- `scaler_state`
+- `best_val_auc`
+- `best_selection_metric`
+- `train_config`
+- `model_config`
+- `class_balance`
+- `rng_state`
+
+Ghi chú:
+
+- `train_config` lưu `TrainConfig` sau khi được serialize.
+- `model_config` lưu `ModelConfig` sau khi được serialize.
+- `class_balance` là trường tùy chọn và chỉ có khi metadata class-balance được tính toán.
+- `rng_state` được lưu để phục vụ khả năng tái lập và resume.

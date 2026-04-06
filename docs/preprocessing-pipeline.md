@@ -1,89 +1,89 @@
-# Preprocessing Pipeline
+# Pipeline Tiền Xử Lý
 
-## Overview
+## Tổng Quan
 
-The recommended execution order is:
+Thứ tự thực thi khuyến nghị:
 
-1. Build `videos_master.csv`
-2. Extract frames
-3. Detect faces and write aligned frame shards
-4. Build clips from aligned frame shards
+1. Tạo `videos_master.csv`
+2. Trích xuất frame
+3. Phát hiện khuôn mặt và ghi aligned frame shard
+4. Tạo clip từ aligned frame shard
 
-## 1. Build Video Metadata
+## 1. Tạo Metadata Cấp Video
 
 Script:
 - [metadata_level.py](../preprocessing/metadata_level.py)
 
-Purpose:
-- scan the dataset directory
-- collect FPS and frame counts
-- assign deterministic `train/val/test` splits balanced within each category
+Mục đích:
+- quét thư mục dataset
+- lấy FPS và số frame
+- gán `train/val/test` một cách xác định, cân bằng trong từng category
 
-Example:
+Ví dụ:
 
 ```bash
 python -m preprocessing.metadata_level --dataset-dir FaceForensics++_C23 --output-dir artifacts --output-name videos_master
 ```
 
-Main output:
+Đầu ra chính:
 - `artifacts/videos_master.csv`
 
-## 2. Extract Frames
+## 2. Trích Xuất Frame
 
 Script:
 - [frame_extractor.py](../preprocessing/frame_extractor.py)
 
-Purpose:
-- read `videos_master.csv`
-- extract frames at a target FPS
-- keep split information on every frame row
-- resume by default using existing frames plus `frame_extraction_audit.csv`
+Mục đích:
+- đọc `videos_master.csv`
+- trích xuất frame theo target FPS
+- giữ thông tin split trên mỗi dòng frame
+- resume mặc định bằng cách dùng frame đã có cùng `frame_extraction_audit.csv`
 
-Examples:
+Ví dụ:
 
-Extract only training data:
+Chỉ trích xuất dữ liệu train:
 
 ```bash
 python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train
 ```
 
-Force a clean rerun without resume:
+Ép chạy lại sạch không dùng resume:
 
 ```bash
 python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train --no-resume
 ```
 
-Extract one category only:
+Chỉ trích xuất một category:
 
 ```bash
 python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --category original
 ```
 
-Main outputs:
+Đầu ra chính:
 - `frame_data/<category>/<video_name>/*.jpg`
 - `frame_data/frame_extraction_metadata.csv`
 - `frame_data/frame_extraction_audit.csv`
 
-## 3. Detect Faces and Build Frame Shards
+## 3. Phát Hiện Khuôn Mặt Và Tạo Frame Shard
 
 Script:
 - [face_detection.py](../preprocessing/face_detection.py)
 
-Purpose:
-- detect the main face per frame
-- align the image using 5 landmarks
-- crop around the aligned bounding box with configurable context
-- write frame-level WebDataset shards
+Mục đích:
+- detect khuôn mặt chính trên từng frame
+- căn chỉnh ảnh bằng 5 landmark
+- crop quanh bounding box đã căn chỉnh với mức context có thể cấu hình
+- ghi WebDataset shard cấp frame
 
-Examples:
+Ví dụ:
 
-Run one split:
+Chạy cho một split:
 
 ```bash
 python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split train
 ```
 
-Run three independent jobs:
+Chạy ba job độc lập:
 
 ```bash
 python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split train
@@ -91,57 +91,67 @@ python -m preprocessing.face_detection --metadata-csv frame_data/frame_extractio
 python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split test
 ```
 
-Important behavior:
+Hành vi quan trọng:
 
-- output is split-specific when `--split` is provided
-- audit CSV is also split-specific
-- face crops are written in streaming mode, not buffered per video
-- alignment runs on a larger square canvas, then the final crop is resized to `--aligned-width/--aligned-height`
+- output tách riêng theo split khi có `--split`
+- audit CSV cũng tách riêng theo split
+- face crop được ghi theo streaming mode, không buffer theo từng video
+- alignment chạy trên một canvas vuông lớn hơn, sau đó crop cuối cùng mới được resize về `--aligned-width/--aligned-height`
 
-Main outputs:
+Đầu ra chính:
 
 - `crop_data/<split>/shard-*.tar`
 - `audit/<split>/face_detection_audit.csv`
 
-## 4. Build Clip Shards
+## 4. Tạo Clip Shard
 
 Script:
 - [build_clips.py](../preprocessing/build_clips.py)
 
-Purpose:
-- read aligned frame shards
-- build fixed-length clips
-- store RGB clips and frame-difference clips
-- use canonical frame-shard `video_id` for clip grouping and keys
+Mục đích:
+- đọc aligned frame shard
+- tạo clip có độ dài cố định
+- lưu RGB clip và frame-difference clip
+- dùng `video_id` canonical của frame shard để group clip và đặt key
 
-Example:
+Ví dụ:
 
 ```bash
 python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split train
 ```
 
-If the target split output already has clip shards, rerun with `--overwrite` to rebuild it cleanly:
+Nếu output của split đó đã tồn tại clip shard, hãy chạy lại với `--overwrite` để rebuild sạch:
 
 ```bash
 python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split train --overwrite
 ```
 
-Main outputs:
+Đầu ra chính:
 - `clip_data/<split>/shard-*.tar`
 
-Important behavior:
+Hành vi quan trọng:
 
-- clip grouping/keying uses canonical frame-shard `video_id`
-- reruns fail fast on existing split shards unless `--overwrite` is provided
+- việc group clip và đặt key dùng `video_id` canonical của frame shard
+- rerun sẽ fail sớm nếu split shard đã tồn tại, trừ khi có `--overwrite`
 
-## Recommended Run Pattern
+## Mẫu Chạy Khuyến Nghị
 
-For full preprocessing, run by split after `videos_master.csv` exists:
+Khi preprocessing toàn bộ dữ liệu, hãy chạy theo từng split sau khi `videos_master.csv` đã tồn tại:
 
 1. `frame_extractor.py --split train`
 2. `face_detection.py --split train`
 3. `build_clips.py --split train`
-4. Repeat for `val`
-5. Repeat for `test`
+4. Lặp lại cho `val`
+5. Lặp lại cho `test`
 
-This keeps outputs isolated and makes parallel jobs simpler to operate.
+Điều này giữ output tách bạch và giúp vận hành job song song đơn giản hơn.
+
+## Bàn Giao Sang Huấn Luyện
+
+Khi `clip_data/train/` và `clip_data/val/` đã tồn tại, stage training có thể tiêu thụ trực tiếp:
+
+```bash
+python -m training.train --train-shards "clip_data/train/shard-*.tar" --val-shards "clip_data/val/shard-*.tar"
+```
+
+Xem [Quy Trình Huấn Luyện](training-workflow.md) để biết chi tiết về mô hình, checkpoint, và runtime.

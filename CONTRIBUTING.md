@@ -1,53 +1,55 @@
-# Contributing
+# Đóng Góp
 
-## Development Setup
+## Thiết Lập Môi Trường Phát Triển
 
-Install the project in editable mode:
+Cài dự án ở chế độ editable:
 
 ```bash
 pip install -e .
 ```
 
-The repository uses Python `>=3.12` and keeps runtime settings in [configs/settings.py](configs/settings.py).
+Kho mã sử dụng Python `>=3.12` và lưu các runtime setting trong [configs/settings.py](configs/settings.py).
 
-## Working Style
+## Nguyên Tắc Làm Việc
 
-- Keep preprocessing stages scriptable from the command line.
-- Prefer class-based orchestration for large stages.
-- Preserve backward compatibility for existing CLI flags and shard schemas unless there is a deliberate migration.
-- Do not silently change metadata field semantics.
+- Giữ các bước preprocessing có thể chạy được từ command line.
+- Ưu tiên cách tổ chức theo class cho các stage lớn.
+- Giữ tương thích ngược cho CLI flag và shard schema hiện có, trừ khi có migration rõ ràng.
+- Không thay đổi ngầm ý nghĩa của các trường metadata.
 
-## Testing
+## Kiểm Thử
 
-Run focused preprocessing tests before opening a change:
+Chạy các test trọng tâm trước khi mở một thay đổi:
 
 ```bash
 python -m unittest tests.test_face_detection tests.test_face_detection_split tests.test_face_detection_crop
-python -m compileall preprocessing tests
+python -m unittest tests.test_dataset_loader tests.test_spatio_temporal_detector tests.test_training_train
+python -m compileall preprocessing training dataloader tests
 ```
 
-When a change affects another stage, add or update tests in `tests/` for that stage as part of the same change.
+Nếu thay đổi ảnh hưởng đến stage nào, hãy thêm hoặc cập nhật test trong `tests/` cho stage đó trong cùng một change.
 
-## Documentation
+## Tài Liệu
 
-Update the relevant docs when you change:
+Cập nhật tài liệu liên quan khi bạn thay đổi:
 
-- CLI flags
+- CLI flag
 - metadata schema
-- shard contents
-- stage ordering
-- default output locations
+- nội dung shard
+- thứ tự stage
+- vị trí output mặc định
 
-The main documentation entry points are:
+Những điểm vào tài liệu chính:
 
 - [README.md](README.md)
 - [docs/preprocessing-pipeline.md](docs/preprocessing-pipeline.md)
+- [docs/training-workflow.md](docs/training-workflow.md)
 - [docs/data-contracts.md](docs/data-contracts.md)
 - [docs/architecture.md](docs/architecture.md)
 
-## Commit Guidance
+## Hướng Dẫn Commit
 
-Use short, descriptive commit messages with a clear scope, for example:
+Sử dụng commit message ngắn gọn, mô tả rõ phạm vi, ví dụ:
 
 ```text
 feat(preprocessing): separate align canvas from final face crop size
