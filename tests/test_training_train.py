@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import io
+import importlib.util
 import json
 import random
 import shutil
 import tarfile
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -22,8 +24,9 @@ from training.train import TrainConfig, main
 from training.utils.builders import build_dataloaders, build_loss, build_model, build_scheduler
 from training.utils.checkpointing import load_checkpoint, save_checkpoint
 from training.utils.class_balance import ClassBalanceInfo, build_class_balance_info
+from training.utils.figures import render_training_figures, resolve_figure_output_dirs
 from training.utils.loops import train_one_epoch, validate_one_epoch
-from training.utils.metrics import select_checkpoint_metric
+from training.utils.metrics import ValidationDiagnostics, select_checkpoint_metric
 from training.utils.progress import build_progress_totals, count_samples_in_shards, estimate_total_batches
 from training.utils.runtime import restore_rng_state, set_seed
 
@@ -84,14 +87,14 @@ def _batch(batch_size: int = 2, temporal_frames: int = 7) -> dict[str, object]:
 
 class TrainModuleTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        tmp_root = Path("d:/Deepfake/.tmp-tests")
-        tmp_root.mkdir(parents=True, exist_ok=True)
-        self.root = tmp_root / uuid.uuid4().hex
+        self._tmpdir = tempfile.TemporaryDirectory(prefix="deepfake-tests-")
+        self.root = Path(self._tmpdir.name) / uuid.uuid4().hex
         self.root.mkdir(parents=True, exist_ok=True)
         _FakeTqdm.instances.clear()
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
+        self._tmpdir.cleanup()
 
     def _write_progress_shard(self, shard_path: Path, sample_count: int) -> None:
         shard_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,6 +119,34 @@ class TrainModuleTestCase(unittest.TestCase):
                 json_payload = json.dumps(metadata).encode("utf-8")
                 cls_payload = str(label).encode("utf-8")
                 for suffix, payload in (("json", json_payload), ("cls", cls_payload)):
+                    info = tarfile.TarInfo(name=f"{key}.{suffix}")
+                    info.size = len(payload)
+                    archive.addfile(info, io.BytesIO(payload))
+
+    def _write_clip_label_shard(self, shard_path: Path, labels: list[int]) -> None:
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
+        rgb_payload = io.BytesIO()
+        np.save(rgb_payload, np.zeros((8, 3, 4, 4), dtype=np.uint8), allow_pickle=False)
+        diff_payload = io.BytesIO()
+        np.save(diff_payload, np.zeros((7, 3, 4, 4), dtype=np.uint8), allow_pickle=False)
+
+        with tarfile.open(shard_path, "w") as archive:
+            for idx, label in enumerate(labels):
+                key = f"video/sample_{idx:06d}"
+                metadata = {
+                    "key": key,
+                    "binary_label": label,
+                    "label": "fake" if label == 1 else "real",
+                    "clip_length": 8,
+                    "num_differences": 7,
+                }
+                parts = {
+                    "json": json.dumps(metadata).encode("utf-8"),
+                    "cls": str(label).encode("utf-8"),
+                    "rgb.npy": rgb_payload.getvalue(),
+                    "diff.npy": diff_payload.getvalue(),
+                }
+                for suffix, payload in parts.items():
                     info = tarfile.TarInfo(name=f"{key}.{suffix}")
                     info.size = len(payload)
                     archive.addfile(info, io.BytesIO(payload))
@@ -236,6 +267,20 @@ class TrainModuleTestCase(unittest.TestCase):
         self.assertIsNone(fallback.raw_pos_weight)
         self.assertIsNone(fallback.effective_pos_weight)
 
+    def test_class_balance_supports_clip_shards_with_multi_part_npy_suffixes(self) -> None:
+        train_dir = self.root / "clip_data" / "train"
+        shard = train_dir / "shard-000000.tar"
+        self._write_clip_label_shard(shard, labels=[1, 0, 1])
+
+        balance = build_class_balance_info(
+            shard_pattern=str(shard),
+            invert_binary_labels=False,
+        )
+
+        self.assertEqual(balance.positive_count, 2)
+        self.assertEqual(balance.negative_count, 1)
+        self.assertAlmostEqual(float(balance.effective_pos_weight), 0.5)
+
     def test_train_one_epoch_works_without_loader_len(self) -> None:
         model = _TinyModel()
         loader = _LoaderWithoutLen([_batch(), _batch()])
@@ -271,7 +316,7 @@ class TrainModuleTestCase(unittest.TestCase):
         cfg = TrainConfig(train_shards="train", val_shards="val", use_amp=False)
 
         with mock.patch("training.utils.loops.tqdm", _FakeTqdm):
-            metrics = validate_one_epoch(
+            metrics, diagnostics = validate_one_epoch(
                 model=model,
                 loader=loader,
                 criterion=criterion,
@@ -284,6 +329,9 @@ class TrainModuleTestCase(unittest.TestCase):
 
         self.assertIn("loss", metrics)
         self.assertAlmostEqual(metrics["loss"], 0.693147, places=4)
+        self.assertIsInstance(diagnostics, ValidationDiagnostics)
+        self.assertEqual(diagnostics.labels.tolist(), [0, 1, 0, 1])
+        self.assertEqual(diagnostics.preds.tolist(), [1, 1, 1, 1])
         self.assertEqual(_FakeTqdm.instances[0].total, 4)
         self.assertEqual(_FakeTqdm.instances[0].desc, "Val 1/3")
 
@@ -402,6 +450,127 @@ class TrainModuleTestCase(unittest.TestCase):
         self.assertEqual(totals["train"], 3)
         self.assertEqual(totals["val"], 3)
 
+    def test_resolve_figure_output_dirs_uses_run_name_under_figure_root(self) -> None:
+        figure_root = self.root / "figures"
+        dirs = resolve_figure_output_dirs(
+            output_dir=self.root / "artifacts" / "experiments" / "st_detector",
+            figure_root=figure_root,
+        )
+
+        self.assertEqual(dirs.run_dir, figure_root / "st_detector")
+        self.assertEqual(dirs.latest_dir, figure_root / "st_detector" / "latest")
+        self.assertEqual(dirs.best_root_dir, figure_root / "st_detector" / "best")
+        self.assertTrue(dirs.latest_dir.exists())
+        self.assertTrue(dirs.best_root_dir.exists())
+
+    @unittest.skipUnless(importlib.util.find_spec("matplotlib") is not None, "matplotlib not installed")
+    def test_render_training_figures_writes_png_and_svg_outputs(self) -> None:
+        history = {
+            "run": {"class_balance": None, "use_pos_weight": True, "auto_pos_weight": True},
+            "train": [
+                {"epoch": 1, "loss": 0.6, "auc": 0.7, "accuracy": 0.65, "f1": 0.62},
+                {"epoch": 2, "loss": 0.5, "auc": 0.76, "accuracy": 0.72, "f1": 0.7},
+            ],
+            "val": [
+                {
+                    "epoch": 1,
+                    "loss": 0.55,
+                    "auc": 0.74,
+                    "accuracy": 0.68,
+                    "f1": 0.64,
+                    "selection_metric": 0.74,
+                    "selection_metric_name": "val_auc",
+                    "learning_rates": [1e-4, 5e-5, 5e-5],
+                },
+                {
+                    "epoch": 2,
+                    "loss": 0.48,
+                    "auc": 0.8,
+                    "accuracy": 0.77,
+                    "f1": 0.74,
+                    "selection_metric": 0.8,
+                    "selection_metric_name": "val_auc",
+                    "learning_rates": [8e-5, 4e-5, 4e-5],
+                },
+            ],
+        }
+        diagnostics = ValidationDiagnostics(
+            labels=np.array([0, 0, 1, 1], dtype=np.int64),
+            probs=np.array([0.1, 0.3, 0.78, 0.91], dtype=np.float32),
+            preds=np.array([0, 0, 1, 1], dtype=np.int64),
+        )
+        figure_dir = self.root / "figures" / "latest"
+
+        render_training_figures(
+            history=history,
+            diagnostics=diagnostics,
+            class_balance_info=None,
+            current_epoch=2,
+            best_epoch=2,
+            selection_metric_name="val_auc",
+            figure_dir=figure_dir,
+            warmup_epochs=1,
+            latest_bundle=True,
+        )
+
+        expected_stems = (
+            "training_dashboard",
+            "validation_curves_latest",
+            "validation_confusion_latest",
+            "validation_score_distribution_latest",
+        )
+        for stem in expected_stems:
+            for suffix in (".png", ".svg"):
+                path = figure_dir / f"{stem}{suffix}"
+                self.assertTrue(path.exists(), path)
+                self.assertGreater(path.stat().st_size, 0, path)
+
+    @unittest.skipUnless(importlib.util.find_spec("matplotlib") is not None, "matplotlib not installed")
+    def test_render_training_figures_handles_single_class_validation(self) -> None:
+        history = {
+            "run": {"class_balance": None, "use_pos_weight": True, "auto_pos_weight": True},
+            "train": [{"epoch": 1, "loss": 0.7, "auc": float("nan"), "accuracy": 1.0, "f1": 0.0}],
+            "val": [
+                {
+                    "epoch": 1,
+                    "loss": 0.4,
+                    "auc": float("nan"),
+                    "accuracy": 1.0,
+                    "f1": 0.0,
+                    "selection_metric": -0.4,
+                    "selection_metric_name": "neg_val_loss",
+                    "learning_rates": [1e-4],
+                }
+            ],
+        }
+        diagnostics = ValidationDiagnostics(
+            labels=np.array([0, 0, 0], dtype=np.int64),
+            probs=np.array([0.1, 0.2, 0.3], dtype=np.float32),
+            preds=np.array([0, 0, 0], dtype=np.int64),
+        )
+        figure_dir = self.root / "figures" / "best" / "epoch_001"
+
+        render_training_figures(
+            history=history,
+            diagnostics=diagnostics,
+            class_balance_info={"positive_class_name": "fake", "positive_count": 0, "negative_count": 3, "effective_pos_weight": None},
+            current_epoch=1,
+            best_epoch=1,
+            selection_metric_name="neg_val_loss",
+            figure_dir=figure_dir,
+            warmup_epochs=3,
+            latest_bundle=False,
+        )
+
+        for stem in (
+            "training_dashboard",
+            "validation_curves",
+            "validation_confusion",
+            "validation_score_distribution",
+        ):
+            self.assertTrue((figure_dir / f"{stem}.png").exists())
+            self.assertTrue((figure_dir / f"{stem}.svg").exists())
+
     def test_main_logs_class_balance_and_uses_warmup_schedule(self) -> None:
         model = nn.Linear(4, 1)
         optimizer = AdamW(model.parameters(), lr=1e-3)
@@ -425,6 +594,11 @@ class TrainModuleTestCase(unittest.TestCase):
             raw_pos_weight=7.0 / 3.0,
             effective_pos_weight=2.0,
         )
+        diagnostics = ValidationDiagnostics(
+            labels=np.array([0, 1], dtype=np.int64),
+            probs=np.array([0.2, 0.8], dtype=np.float32),
+            preds=np.array([0, 1], dtype=np.int64),
+        )
 
         with mock.patch("training.train.setup_logging"), \
              mock.patch("training.train.parse_args", return_value=cfg), \
@@ -437,16 +611,22 @@ class TrainModuleTestCase(unittest.TestCase):
              mock.patch("training.train.build_loss", return_value=mock.Mock()), \
              mock.patch("training.train.build_optimizer", return_value=optimizer), \
              mock.patch("training.train.build_scheduler", return_value=scheduler), \
+             mock.patch("training.train.resolve_figure_output_dirs", return_value=mock.Mock(run_dir=self.root / "figures", latest_dir=self.root / "figures" / "latest", best_root_dir=self.root / "figures" / "best")) as resolve_figures_mock, \
+             mock.patch("training.train.render_training_figures") as render_figures_mock, \
              mock.patch("training.train.set_spatial_branch_trainable") as freeze_mock, \
              mock.patch("training.train.train_one_epoch", return_value={"loss": 0.4, "auc": 0.7, "accuracy": 0.8, "f1": 0.75}) as train_epoch_mock, \
-             mock.patch("training.train.validate_one_epoch", return_value={"loss": 0.3, "auc": 0.8, "accuracy": 0.9, "f1": 0.85}) as val_epoch_mock, \
+             mock.patch("training.train.validate_one_epoch", return_value=({"loss": 0.3, "auc": 0.8, "accuracy": 0.9, "f1": 0.85}, diagnostics)) as val_epoch_mock, \
              mock.patch("training.train.write_history") as write_history_mock, \
              mock.patch("training.train.save_checkpoint"), \
              mock.patch("training.train.logger") as logger_mock:
             main()
 
+        self.assertEqual(resolve_figures_mock.call_count, 1)
         self.assertEqual(scheduler.step.call_count, 4)
         self.assertEqual(freeze_mock.call_count, 4)
+        self.assertEqual(render_figures_mock.call_count, 5)
+        self.assertTrue(render_figures_mock.call_args_list[0].kwargs["latest_bundle"])
+        self.assertFalse(render_figures_mock.call_args_list[1].kwargs["latest_bundle"])
         self.assertEqual(
             [call.kwargs["trainable"] for call in freeze_mock.call_args_list],
             [False, False, False, True],

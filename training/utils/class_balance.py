@@ -25,6 +25,19 @@ def _sample_base_key(member_name: str) -> str | None:
     normalized = member_name.replace("\\", "/")
     if not normalized or normalized.endswith("/"):
         return None
+    known_suffixes = (
+        ".rgb.npy",
+        ".diff.npy",
+        ".json",
+        ".cls",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".npy",
+    )
+    for suffix in known_suffixes:
+        if normalized.endswith(suffix):
+            return normalized[: -len(suffix)]
     if "." not in normalized:
         return None
     return normalized.rsplit(".", 1)[0]

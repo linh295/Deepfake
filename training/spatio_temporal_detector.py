@@ -22,6 +22,8 @@ class ModelConfig:
     pretrained: bool = True
     freeze_spatial_backbone: bool = False
     temporal_pool: Literal["mean", "attention"] = "mean"
+    use_spatial_attention: bool = True
+    use_texture_enhancement: bool = True
 
 
 class SpatioTemporalDeepfakeDetector(nn.Module):
@@ -32,6 +34,8 @@ class SpatioTemporalDeepfakeDetector(nn.Module):
         self.spatial_branch = SpatialResNet50(
             pretrained=config.pretrained,
             freeze_backbone=config.freeze_spatial_backbone,
+            use_spatial_attention=config.use_spatial_attention,
+            use_texture_enhancement=config.use_texture_enhancement,
         )
         self.temporal_branch = TemporalDiffCNN(
             in_channels=config.temporal_in_channels,
@@ -46,6 +50,12 @@ class SpatioTemporalDeepfakeDetector(nn.Module):
             num_classes=config.num_classes,
             dropout=config.dropout,
         )
+
+    def freeze_spatial(self) -> None:
+        self.spatial_branch.freeze()
+
+    def unfreeze_spatial(self) -> None:
+        self.spatial_branch.unfreeze()
 
     def _validate_temporal_input(self, temporal: torch.Tensor) -> None:
         if temporal.ndim != 5:
@@ -65,8 +75,22 @@ class SpatioTemporalDeepfakeDetector(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         self._validate_temporal_input(temporal)
 
-        spatial_feat = self.spatial_branch(spatial)
-        temporal_feat = self.temporal_branch(temporal)
+        if return_features:
+            spatial_feat, spatial_extras = self.spatial_branch(
+                spatial,
+                return_attention=True,
+                return_feature_maps=True,
+            )
+            temporal_feat, temporal_attn = self.temporal_branch(
+                temporal,
+                return_attention=True,
+            )
+        else:
+            spatial_feat = self.spatial_branch(spatial)
+            temporal_feat = self.temporal_branch(temporal)
+            spatial_extras = {}
+            temporal_attn = None
+
         logits = self.fusion_head(spatial_feat, temporal_feat)
 
         if self.config.num_classes == 1:
@@ -79,11 +103,18 @@ class SpatioTemporalDeepfakeDetector(nn.Module):
             "spatial_feat": spatial_feat,
             "temporal_feat": temporal_feat,
         }
+        features.update(spatial_extras)
+        if temporal_attn is not None:
+            features["temporal_attn"] = temporal_attn
         return logits, features
 
 
 if __name__ == "__main__":
-    cfg = ModelConfig()
+    cfg = ModelConfig(
+        temporal_pool="attention",
+        use_spatial_attention=True,
+        use_texture_enhancement=True,
+    )
     model = SpatioTemporalDeepfakeDetector(cfg)
 
     spatial = torch.randn(2, 3, 224, 224)
@@ -93,3 +124,5 @@ if __name__ == "__main__":
     print("logits:", tuple(logits.shape))
     print("spatial_feat:", tuple(features["spatial_feat"].shape))
     print("temporal_feat:", tuple(features["temporal_feat"].shape))
+    print("spatial_attn:", tuple(features["spatial_attn"].shape))
+    print("temporal_attn:", tuple(features["temporal_attn"].shape))

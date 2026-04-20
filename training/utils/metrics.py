@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from torch.optim import AdamW
+
+
+@dataclass(frozen=True)
+class ValidationDiagnostics:
+    labels: np.ndarray
+    probs: np.ndarray
+    preds: np.ndarray
+
+    @property
+    def has_both_classes(self) -> bool:
+        return np.unique(self.labels).size >= 2
 
 
 def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -33,6 +45,15 @@ def compute_binary_metrics(labels: np.ndarray, probs: np.ndarray) -> dict[str, f
     return metrics
 
 
+def _stack_epoch_outputs(
+    all_probs: list[torch.Tensor],
+    all_labels: list[torch.Tensor],
+) -> tuple[np.ndarray, np.ndarray]:
+    probs_np = torch.cat(all_probs).numpy().astype(np.float32).reshape(-1)
+    labels_np = torch.cat(all_labels).numpy().astype(np.int64).reshape(-1)
+    return probs_np, labels_np
+
+
 def finalize_epoch_metrics(
     *,
     running_loss: float,
@@ -44,11 +65,21 @@ def finalize_epoch_metrics(
     if num_steps == 0 or not all_probs or not all_labels:
         raise RuntimeError(f"No valid {stage_name} batches were produced for this epoch.")
 
-    probs_np = torch.cat(all_probs).numpy()
-    labels_np = torch.cat(all_labels).numpy().astype(np.int64)
+    probs_np, labels_np = _stack_epoch_outputs(all_probs, all_labels)
     metrics = compute_binary_metrics(labels_np, probs_np)
     metrics["loss"] = running_loss / num_steps
     return metrics
+
+
+def build_validation_diagnostics(
+    *,
+    all_probs: list[torch.Tensor],
+    all_labels: list[torch.Tensor],
+    threshold: float = 0.5,
+) -> ValidationDiagnostics:
+    probs_np, labels_np = _stack_epoch_outputs(all_probs, all_labels)
+    preds_np = (probs_np >= threshold).astype(np.int64)
+    return ValidationDiagnostics(labels=labels_np, probs=probs_np, preds=preds_np)
 
 
 def select_checkpoint_metric(val_metrics: dict[str, float]) -> tuple[float, str]:
@@ -60,4 +91,3 @@ def select_checkpoint_metric(val_metrics: dict[str, float]) -> tuple[float, str]
 
 def get_current_lrs(optimizer: AdamW) -> list[float]:
     return [float(group["lr"]) for group in optimizer.param_groups]
-

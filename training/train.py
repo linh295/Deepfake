@@ -11,6 +11,7 @@ import torch
 from torch.amp import GradScaler
 
 from configs.loggings import logger, setup_logging
+from configs.settings import settings
 from training.utils.builders import (
     build_dataloaders,
     build_loss,
@@ -20,6 +21,7 @@ from training.utils.builders import (
 )
 from training.utils.class_balance import build_class_balance_info
 from training.utils.checkpointing import save_checkpoint, write_history
+from training.utils.figures import render_training_figures, resolve_figure_output_dirs
 from training.utils.freezing import set_spatial_branch_trainable
 from training.utils.loops import train_one_epoch, validate_one_epoch
 from training.utils.metrics import get_current_lrs, select_checkpoint_metric
@@ -35,15 +37,23 @@ class TrainConfig:
     epochs: int = 30
     batch_size: int = 12
     num_workers: int = 4
+
     lr_spatial: float = 1e-5
     lr_temporal: float = 1e-4
     lr_fusion: float = 1e-4
     weight_decay: float = 1e-4
+
     clip_len: int = 8
     invert_binary_labels: bool = False
     use_pos_weight: bool = True
     auto_pos_weight: bool = True
     max_pos_weight: float | None = None
+
+    model_dropout: float = 0.3
+    temporal_pool: str = "mean"
+    use_spatial_attention: bool = True
+    use_texture_enhancement: bool = True
+
     seed: int = 42
     device: str = "cuda"
     use_amp: bool = True
@@ -60,23 +70,33 @@ class TrainConfig:
     scheduler_min_lr: float = 0.0
     spatial_freeze_warmup_epochs: int = 3
 
+
 def parse_args() -> TrainConfig:
     parser = argparse.ArgumentParser(description="Train spatio-temporal deepfake detector")
     parser.add_argument("--train-shards", type=str, required=True, help='e.g. "clip_data/train/shard-*.tar"')
     parser.add_argument("--val-shards", type=str, required=True, help='e.g. "clip_data/val/shard-*.tar"')
     parser.add_argument("--output-dir", type=str, default="artifacts/experiments/st_detector")
+
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=4)
+
     parser.add_argument("--lr-spatial", type=float, default=1e-5)
     parser.add_argument("--lr-temporal", type=float, default=5e-5)
     parser.add_argument("--lr-fusion", type=float, default=5e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+
     parser.add_argument("--clip-len", type=int, default=8)
     parser.add_argument("--invert-binary-labels", action="store_true")
     parser.add_argument("--disable-pos-weight", action="store_true")
     parser.add_argument("--disable-auto-pos-weight", action="store_true")
     parser.add_argument("--max-pos-weight", type=float, default=None)
+
+    parser.add_argument("--model-dropout", type=float, default=0.3)
+    parser.add_argument("--temporal-pool", type=str, choices=["mean", "attention"], default="mean")
+    parser.add_argument("--disable-spatial-attention", action="store_true")
+    parser.add_argument("--disable-texture-enhancement", action="store_true")
+
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--disable-amp", action="store_true")
@@ -110,6 +130,10 @@ def parse_args() -> TrainConfig:
         use_pos_weight=not args.disable_pos_weight,
         auto_pos_weight=not args.disable_auto_pos_weight,
         max_pos_weight=args.max_pos_weight,
+        model_dropout=args.model_dropout,
+        temporal_pool=args.temporal_pool,
+        use_spatial_attention=not args.disable_spatial_attention,
+        use_texture_enhancement=not args.disable_texture_enhancement,
         seed=args.seed,
         device=args.device,
         use_amp=not args.disable_amp,
@@ -136,12 +160,21 @@ def main() -> None:
     device = resolve_device(cfg.device)
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    figure_dirs = resolve_figure_output_dirs(output_dir=output_dir, figure_root=settings.FIGURE_DIR)
 
     logger.info("Device: {}", device)
     logger.info("Output dir: {}", output_dir)
+    logger.info("Figure dir: {}", figure_dirs.run_dir)
     logger.info("Train shards: {}", cfg.train_shards)
     logger.info("Val shards: {}", cfg.val_shards)
     logger.info("Invert binary labels: {}", cfg.invert_binary_labels)
+    logger.info(
+        "Model options | dropout={} | temporal_pool={} | spatial_attention={} | texture_enhancement={}",
+        cfg.model_dropout,
+        cfg.temporal_pool,
+        cfg.use_spatial_attention,
+        cfg.use_texture_enhancement,
+    )
 
     train_loader, val_loader = build_dataloaders(cfg)
     progress_totals = build_progress_totals(
@@ -149,6 +182,7 @@ def main() -> None:
         val_shards=cfg.val_shards,
         batch_size=cfg.batch_size,
     )
+
     class_balance_info = None
     if cfg.use_pos_weight and cfg.auto_pos_weight:
         class_balance_info = build_class_balance_info(
@@ -156,6 +190,7 @@ def main() -> None:
             invert_binary_labels=cfg.invert_binary_labels,
             max_pos_weight=cfg.max_pos_weight,
         )
+
     model, model_cfg = build_model(cfg, device)
     criterion = build_loss(cfg, device, class_balance_info)
     optimizer = build_optimizer(model, cfg)
@@ -171,6 +206,10 @@ def main() -> None:
             "class_balance": class_balance_info.as_dict() if class_balance_info is not None else None,
             "use_pos_weight": cfg.use_pos_weight,
             "auto_pos_weight": cfg.auto_pos_weight,
+            "model_dropout": cfg.model_dropout,
+            "temporal_pool": cfg.temporal_pool,
+            "use_spatial_attention": cfg.use_spatial_attention,
+            "use_texture_enhancement": cfg.use_texture_enhancement,
         },
         "train": [],
         "val": [],
@@ -194,6 +233,7 @@ def main() -> None:
         freeze_spatial = epoch <= cfg.spatial_freeze_warmup_epochs
         phase_name = "temporal_warmup" if freeze_spatial else "full_finetune"
         set_spatial_branch_trainable(model, trainable=not freeze_spatial)
+
         epoch_start = time.time()
         train_metrics = train_one_epoch(
             model,
@@ -207,7 +247,7 @@ def main() -> None:
             total_batches=progress_totals["train"],
             stage_label=f"Train {epoch}/{cfg.epochs}",
         )
-        val_metrics = validate_one_epoch(
+        val_metrics, val_diagnostics = validate_one_epoch(
             model,
             val_loader,
             criterion,
@@ -220,6 +260,7 @@ def main() -> None:
 
         current_selection_metric, selection_metric_name = select_checkpoint_metric(val_metrics)
         scheduler.step(current_selection_metric)
+
         current_val_auc = float(val_metrics["auc"])
         if not math.isnan(current_val_auc):
             if math.isnan(best_val_auc) or current_val_auc > best_val_auc:
@@ -234,6 +275,7 @@ def main() -> None:
                 "selection_metric": current_selection_metric,
                 "selection_metric_name": selection_metric_name,
                 "learning_rates": current_lrs,
+                "phase": phase_name,
             }
         )
 
@@ -255,7 +297,8 @@ def main() -> None:
             current_lrs,
         )
 
-        write_history(output_dir / "history.json", history)
+        is_new_best = current_selection_metric > best_selection_metric
+        should_stop = False
 
         if epoch % cfg.save_every == 0:
             save_checkpoint(
@@ -272,7 +315,7 @@ def main() -> None:
                 class_balance_info.as_dict() if class_balance_info is not None else None,
             )
 
-        if current_selection_metric > best_selection_metric:
+        if is_new_best:
             best_selection_metric = current_selection_metric
             best_epoch = epoch
             epochs_without_improvement = 0
@@ -298,6 +341,7 @@ def main() -> None:
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= cfg.early_stopping_patience:
+                should_stop = True
                 logger.info(
                     "Early stopping triggered after {} epochs without improvement. "
                     "Best epoch={} best_selection_metric={:.4f}",
@@ -305,7 +349,42 @@ def main() -> None:
                     best_epoch,
                     best_selection_metric,
                 )
-                break
+
+        write_history(output_dir / "history.json", history)
+
+        try:
+            render_training_figures(
+                history=history,
+                diagnostics=val_diagnostics,
+                class_balance_info=class_balance_info.as_dict() if class_balance_info is not None else None,
+                current_epoch=epoch,
+                best_epoch=best_epoch,
+                selection_metric_name=selection_metric_name,
+                figure_dir=figure_dirs.latest_dir,
+                warmup_epochs=cfg.spatial_freeze_warmup_epochs,
+                latest_bundle=True,
+            )
+        except Exception as exc:
+            logger.warning("Failed to render latest training figures at epoch {} ({}).", epoch, exc)
+
+        if is_new_best:
+            try:
+                render_training_figures(
+                    history=history,
+                    diagnostics=val_diagnostics,
+                    class_balance_info=class_balance_info.as_dict() if class_balance_info is not None else None,
+                    current_epoch=epoch,
+                    best_epoch=best_epoch,
+                    selection_metric_name=selection_metric_name,
+                    figure_dir=figure_dirs.best_root_dir / f"epoch_{epoch:03d}",
+                    warmup_epochs=cfg.spatial_freeze_warmup_epochs,
+                    latest_bundle=False,
+                )
+            except Exception as exc:
+                logger.warning("Failed to render best-epoch training figures at epoch {} ({}).", epoch, exc)
+
+        if should_stop:
+            break
 
     logger.info(
         "Training finished. Best epoch={} | best_val_auc={} | best_selection_metric={:.4f}",

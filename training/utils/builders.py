@@ -54,10 +54,12 @@ def build_model_config(cfg: "TrainConfig") -> ModelConfig:
         temporal_num_frames=cfg.clip_len - 1,
         temporal_feature_dim=256,
         fusion_hidden_dim=512,
-        dropout=0.3,
+        dropout=cfg.model_dropout,
         pretrained=True,
         freeze_spatial_backbone=False,
-        temporal_pool="mean",
+        temporal_pool=cfg.temporal_pool,
+        use_spatial_attention=cfg.use_spatial_attention,
+        use_texture_enhancement=cfg.use_texture_enhancement,
     )
 
 
@@ -82,7 +84,11 @@ def build_loss(
         and class_balance_info is not None
         and class_balance_info.effective_pos_weight is not None
     ):
-        pos_weight = torch.tensor([class_balance_info.effective_pos_weight], dtype=torch.float32, device=device)
+        pos_weight = torch.tensor(
+            [class_balance_info.effective_pos_weight],
+            dtype=torch.float32,
+            device=device,
+        )
         return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     return nn.BCEWithLogitsLoss()
 

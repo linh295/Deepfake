@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Literal
 
 import torch
@@ -65,7 +63,11 @@ class TemporalDiffCNN(nn.Module):
         else:
             self.attention = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_attention: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         b, t, c, h, w = x.shape
         x = x.reshape(b * t, c, h, w)
         x = self.frame_encoder(x)
@@ -73,8 +75,20 @@ class TemporalDiffCNN(nn.Module):
         x = x.reshape(b, t, self.feature_dim)
 
         if self.pool_mode == "mean":
-            return x.mean(dim=1)
+            pooled = x.mean(dim=1)
+            if return_attention:
+                uniform_attn = torch.full(
+                    (b, t, 1),
+                    fill_value=1.0 / max(1, t),
+                    dtype=x.dtype,
+                    device=x.device,
+                )
+                return pooled, uniform_attn
+            return pooled
 
         attn_logits = self.attention(x)
         attn_weights = torch.softmax(attn_logits, dim=1)
-        return (x * attn_weights).sum(dim=1)
+        pooled = (x * attn_weights).sum(dim=1)
+        if return_attention:
+            return pooled, attn_weights
+        return pooled

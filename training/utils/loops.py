@@ -9,7 +9,12 @@ from torch.optim import AdamW
 from tqdm import tqdm
 
 from training.spatio_temporal_detector import SpatioTemporalDeepfakeDetector
-from training.utils.metrics import finalize_epoch_metrics, move_batch_to_device
+from training.utils.metrics import (
+    ValidationDiagnostics,
+    build_validation_diagnostics,
+    finalize_epoch_metrics,
+    move_batch_to_device,
+)
 
 if TYPE_CHECKING:
     from training.train import TrainConfig
@@ -92,7 +97,7 @@ def validate_one_epoch(
     cfg: "TrainConfig",
     total_batches: int | None = None,
     stage_label: str | None = None,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], ValidationDiagnostics]:
     model.eval()
     running_loss = 0.0
     num_steps = 0
@@ -118,10 +123,16 @@ def validate_one_epoch(
         all_probs.append(probs.cpu())
         all_labels.append(batch["label"].cpu())
 
-    return finalize_epoch_metrics(
+    metrics = finalize_epoch_metrics(
         running_loss=running_loss,
         num_steps=num_steps,
         all_probs=all_probs,
         all_labels=all_labels,
         stage_name="validation",
     )
+    diagnostics = build_validation_diagnostics(
+        all_probs=all_probs,
+        all_labels=all_labels,
+        threshold=0.5,
+    )
+    return metrics, diagnostics
