@@ -69,6 +69,24 @@ class TrainConfig:
     scheduler_threshold: float = 1e-4
     scheduler_min_lr: float = 0.0
     spatial_freeze_warmup_epochs: int = 3
+    
+    use_augmentation: bool = False
+    augment_recompute_diff: bool = True
+    hflip_prob: float = 0.5
+    brightness: float = 0.10
+    contrast: float = 0.10
+    
+    loss_type: str = "bce"
+    focal_alpha: float = 0.75
+    focal_gamma: float = 2.0
+    
+    jpeg_prob: float = 0.0
+    jpeg_quality_min: int = 70
+    jpeg_quality_max: int = 95
+
+    blur_prob: float = 0.0
+    blur_sigma_min: float = 0.1
+    blur_sigma_max: float = 1.0
 
 
 def parse_args() -> TrainConfig:
@@ -112,6 +130,21 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--spatial-freeze-warmup-epochs", type=int, default=3)
     parser.add_argument("--disable-pin-memory", action="store_true")
     parser.add_argument("--disable-persistent-workers", action="store_true")
+    parser.add_argument("--use-augmentation", action="store_true")
+    parser.add_argument("--disable-augment-recompute-diff", action="store_true")
+    parser.add_argument("--hflip-prob", type=float, default=0.5)
+    parser.add_argument("--brightness", type=float, default=0.10)
+    parser.add_argument("--contrast", type=float, default=0.10)
+    parser.add_argument("--loss-type", type=str, choices=["bce", "focal"], default="bce")
+    parser.add_argument("--focal-alpha", type=float, default=0.75)
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--jpeg-prob", type=float, default=0.0)
+    parser.add_argument("--jpeg-quality-min", type=int, default=70)
+    parser.add_argument("--jpeg-quality-max", type=int, default=95)
+
+    parser.add_argument("--blur-prob", type=float, default=0.0)
+    parser.add_argument("--blur-sigma-min", type=float, default=0.1)
+    parser.add_argument("--blur-sigma-max", type=float, default=1.0)
     args = parser.parse_args()
 
     return TrainConfig(
@@ -149,6 +182,14 @@ def parse_args() -> TrainConfig:
         scheduler_threshold=args.scheduler_threshold,
         scheduler_min_lr=args.scheduler_min_lr,
         spatial_freeze_warmup_epochs=args.spatial_freeze_warmup_epochs,
+        use_augmentation=args.use_augmentation,
+        augment_recompute_diff=not args.disable_augment_recompute_diff,
+        hflip_prob=args.hflip_prob,
+        brightness=args.brightness,
+        contrast=args.contrast,
+        loss_type=args.loss_type,
+        focal_alpha=args.focal_alpha,
+        focal_gamma=args.focal_gamma,
     )
 
 
@@ -363,6 +404,7 @@ def main() -> None:
                 figure_dir=figure_dirs.latest_dir,
                 warmup_epochs=cfg.spatial_freeze_warmup_epochs,
                 latest_bundle=True,
+                invert_binary_labels=cfg.invert_binary_labels,
             )
         except Exception as exc:
             logger.warning("Failed to render latest training figures at epoch {} ({}).", epoch, exc)
@@ -379,6 +421,7 @@ def main() -> None:
                     figure_dir=figure_dirs.best_root_dir / f"epoch_{epoch:03d}",
                     warmup_epochs=cfg.spatial_freeze_warmup_epochs,
                     latest_bundle=False,
+                    invert_binary_labels=cfg.invert_binary_labels,
                 )
             except Exception as exc:
                 logger.warning("Failed to render best-epoch training figures at epoch {} ({}).", epoch, exc)

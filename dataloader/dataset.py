@@ -12,6 +12,10 @@ import torch
 import webdataset as wds
 from torch.utils.data import DataLoader
 
+import torchvision.transforms.functional as TF
+from torchvision.transforms import InterpolationMode
+from PIL import Image, ImageFilter
+
 
 @dataclass
 class ClipDatasetConfig:
@@ -21,6 +25,23 @@ class ClipDatasetConfig:
     invert_binary_labels: bool = False
     spatial_candidate_indices: tuple[int, ...] = (2, 3, 4, 5)
     training: bool = True
+
+    # Augmentation config. Applied only when training=True.
+    use_augmentation: bool = False
+    augment_recompute_diff: bool = True
+    hflip_prob: float = 0.5
+    brightness: float = 0.10
+    contrast: float = 0.10
+    
+    jpeg_prob: float = 0.0
+    jpeg_quality_min: int = 70
+    jpeg_quality_max: int = 95
+
+    blur_prob: float = 0.0
+    blur_kernel: int = 3
+    blur_sigma_min: float = 0.1
+    blur_sigma_max: float = 1.0
+
     shuffle_buffer: int = 1000
     seed: int = 42
     batch_size: int = 8
@@ -34,11 +55,17 @@ class ClipDatasetConfig:
         expected_diff_len = self.clip_len - 1
         if self.diff_len is None:
             self.diff_len = expected_diff_len
-            return
-        if self.diff_len != expected_diff_len:
+        elif self.diff_len != expected_diff_len:
             raise ValueError(
                 f"diff_len must equal clip_len - 1 ({expected_diff_len}), got {self.diff_len}"
             )
+
+        if not (0.0 <= self.hflip_prob <= 1.0):
+            raise ValueError(f"hflip_prob must be in [0, 1], got {self.hflip_prob}")
+        if self.brightness < 0:
+            raise ValueError(f"brightness must be >= 0, got {self.brightness}")
+        if self.contrast < 0:
+            raise ValueError(f"contrast must be >= 0, got {self.contrast}")
 
 
 class ClipWebDataset:
@@ -61,6 +88,10 @@ class ClipWebDataset:
     def __init__(self, config: ClipDatasetConfig) -> None:
         self.config = config
         self._bad_sample_count = 0
+
+        # Avoid recreating these tensors for every sample.
+        self.rgb_mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
+        self.rgb_std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
 
     def _load_npy_bytes(self, payload: bytes) -> np.ndarray:
         with io.BytesIO(payload) as buffer:
@@ -140,16 +171,115 @@ class ClipWebDataset:
             return 1.0 - label_value
         return label_value
 
+    def _sample_clip_augmentation_params(self) -> dict[str, float | bool]:
+        """
+        Sample one augmentation parameter set for the whole clip.
+
+        Critical for temporal modeling:
+        all 8 RGB frames receive exactly the same transform.
+        """
+        do_hflip = random.random() < self.config.hflip_prob
+
+        brightness_factor = 1.0
+        if self.config.brightness > 0:
+            brightness_factor = random.uniform(
+                1.0 - self.config.brightness,
+                1.0 + self.config.brightness,
+            )
+
+        contrast_factor = 1.0
+        if self.config.contrast > 0:
+            contrast_factor = random.uniform(
+                1.0 - self.config.contrast,
+                1.0 + self.config.contrast,
+            )
+        
+        do_jpeg = random.random() < self.config.jpeg_prob
+        jpeg_quality = random.randint(
+            self.config.jpeg_quality_min,
+            self.config.jpeg_quality_max,
+        )
+
+        do_blur = random.random() < self.config.blur_prob
+        blur_sigma = random.uniform(
+            self.config.blur_sigma_min,
+            self.config.blur_sigma_max,
+        )
+
+        return {
+            "do_hflip": do_hflip,
+            "brightness_factor": brightness_factor,
+            "contrast_factor": contrast_factor,
+            "do_jpeg": do_jpeg,
+            "jpeg_quality": jpeg_quality,
+            "do_blur": do_blur,
+            "blur_sigma": blur_sigma,
+        }
+
+    def _apply_clip_consistent_augmentation(self, rgb: torch.Tensor) -> torch.Tensor:
+        """
+        Apply safe clip-consistent augmentation.
+
+        Input:
+            rgb: [T, 3, H, W], value range [0, 255]
+        Output:
+            rgb: [T, 3, H, W], float32, value range [0, 255]
+        """
+        rgb = rgb.float()
+
+        if not (self.config.training and self.config.use_augmentation):
+            return rgb
+
+        params = self._sample_clip_augmentation_params()
+
+        if bool(params["do_hflip"]):
+            rgb = torch.flip(rgb, dims=[-1])
+
+        contrast_factor = float(params["contrast_factor"])
+        if contrast_factor != 1.0:
+            mean = rgb.mean(dim=(-2, -1), keepdim=True)
+            rgb = (rgb - mean) * contrast_factor + mean
+
+        brightness_factor = float(params["brightness_factor"])
+        if brightness_factor != 1.0:
+            rgb = rgb * brightness_factor
+            
+        if bool(params["do_blur"]):
+            rgb = torch.stack(
+                [
+                    self._apply_gaussian_blur_to_frame(frame, sigma=float(params["blur_sigma"]))
+                    for frame in rgb
+                ],
+                dim=0,
+            )
+
+        if bool(params["do_jpeg"]):
+            rgb = torch.stack(
+                [
+                    self._apply_jpeg_compression_to_frame(frame, quality=int(params["jpeg_quality"]))
+                    for frame in rgb
+                ],
+                dim=0,
+            )
+
+        return rgb.clamp(0.0, 255.0)
+
+    def _recompute_diff_from_rgb(self, rgb: torch.Tensor) -> torch.Tensor:
+        """
+        Recompute absolute frame difference from RGB clip.
+
+        Input:
+            rgb: [T, 3, H, W], value range [0, 255]
+        Output:
+            diff: [T-1, 3, H, W], value range [0, 255]
+        """
+        return torch.abs(rgb[1:] - rgb[:-1]).clamp(0.0, 255.0)
+
     def _normalize_rgb(self, tensor: torch.Tensor) -> torch.Tensor:
-        # ImageNet normalization for spatial RGB branch.
-        mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
         tensor = tensor.float().div(255.0)
-        return (tensor - mean) / std
+        return (tensor - self.rgb_mean) / self.rgb_std
 
     def _normalize_diff(self, tensor: torch.Tensor) -> torch.Tensor:
-        # diff.npy stores absolute frame-difference magnitudes, so keep a simple
-        # [0, 1] scaling until temporal-model expectations are defined.
         return tensor.float().div(255.0)
 
     def _sample_key(self, sample: Dict[str, Any], metadata: Dict[str, Any] | None = None) -> str:
@@ -164,12 +294,39 @@ class ClipWebDataset:
 
         return "<unknown>"
 
+    def _apply_jpeg_compression_to_frame(self, frame: torch.Tensor, quality: int) -> torch.Tensor:
+        """
+        frame: [3, H, W], float tensor in [0, 255]
+        """
+        frame_uint8 = frame.clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
+
+        image = Image.fromarray(frame_uint8)
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=int(quality))
+        buffer.seek(0)
+
+        compressed = Image.open(buffer).convert("RGB")
+        arr = np.asarray(compressed).copy()
+        return torch.from_numpy(arr).permute(2, 0, 1).float()
+    
+    def _apply_gaussian_blur_to_frame(self, frame: torch.Tensor, sigma: float) -> torch.Tensor:
+        """
+        frame: [3, H, W], float tensor in [0, 255]
+        """
+        frame_uint8 = frame.clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
+
+        image = Image.fromarray(frame_uint8)
+        image = image.filter(ImageFilter.GaussianBlur(radius=float(sigma)))
+
+        arr = np.asarray(image).copy()
+        return torch.from_numpy(arr).permute(2, 0, 1).float()
+    
     def _wrap_sample_error(
         self,
         sample: Dict[str, Any],
         exc: Exception,
         metadata: Dict[str, Any] | None = None,
-    ) -> ClipSampleDecodeError:
+    ) -> "ClipSampleDecodeError":
         if isinstance(exc, ClipSampleDecodeError):
             return exc
 
@@ -233,21 +390,34 @@ class ClipWebDataset:
                 )
 
             spatial_idx = self._choose_spatial_index(metadata)
-            spatial = torch.from_numpy(rgb[spatial_idx].copy())
-            temporal = torch.from_numpy(diff.copy())
+
+            rgb_tensor = torch.from_numpy(rgb.copy())  # [T, 3, H, W]
+            rgb_tensor = self._apply_clip_consistent_augmentation(rgb_tensor)
+
+            if self.config.training and self.config.use_augmentation and self.config.augment_recompute_diff:
+                diff_tensor = self._recompute_diff_from_rgb(rgb_tensor)
+            else:
+                diff_tensor = torch.from_numpy(diff.copy()).float()
+
+            if diff_tensor.shape[0] != self.config.diff_len:
+                raise ValueError(
+                    f"Expected processed diff_len={self.config.diff_len}, got {diff_tensor.shape[0]}"
+                )
+
+            spatial = rgb_tensor[spatial_idx]
+            temporal = diff_tensor
             label = torch.tensor(self._extract_label(sample, metadata), dtype=torch.float32)
 
             spatial = self._normalize_rgb(spatial)
             temporal = self._normalize_diff(temporal)
 
-            output = {
-                "spatial": spatial,                  # [3, H, W]
-                "temporal": temporal,                # [T-1, 3, H, W]
-                "label": label,                      # []
+            return {
+                "spatial": spatial,
+                "temporal": temporal,
+                "label": label,
                 "spatial_index": torch.tensor(spatial_idx, dtype=torch.long),
                 "meta": metadata,
             }
-            return output
         except Exception as exc:
             raise self._wrap_sample_error(sample, exc, metadata) from exc
 
@@ -273,7 +443,6 @@ class ClipSampleDecodeError(ValueError):
         self.sample_key = sample_key
 
 
-
 def collate_clip_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     spatial = torch.stack([item["spatial"] for item in batch], dim=0)
     temporal = torch.stack([item["temporal"] for item in batch], dim=0)
@@ -282,20 +451,19 @@ def collate_clip_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     metas = [item["meta"] for item in batch]
 
     return {
-        "spatial": spatial,              # [B, 3, H, W]
-        "temporal": temporal,            # [B, T-1, 3, H, W]
-        "label": labels,                 # [B]
+        "spatial": spatial,
+        "temporal": temporal,
+        "label": labels,
         "spatial_index": spatial_indices,
         "meta": metas,
     }
-
 
 
 def build_clip_dataloader(config: ClipDatasetConfig) -> DataLoader:
     dataset_builder = ClipWebDataset(config)
     dataset = dataset_builder.build_dataset()
 
-    loader = DataLoader(
+    return DataLoader(
         dataset,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
@@ -304,19 +472,17 @@ def build_clip_dataloader(config: ClipDatasetConfig) -> DataLoader:
         drop_last=config.drop_last,
         collate_fn=collate_clip_batch,
     )
-    return loader
 
 
 if __name__ == "__main__":
-    # Minimal smoke-test example:
-    # python dataset.py --shards "clip_data/train/shard-*.tar"
     import argparse
 
     parser = argparse.ArgumentParser(description="Clip WebDataset smoke test")
     parser.add_argument("--shards", type=str, required=True, help="Shard pattern, e.g. clip_data/train/shard-*.tar")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--eval", action="store_true", help="Use deterministic center frame instead of random sampling")
+    parser.add_argument("--eval", action="store_true")
+    parser.add_argument("--augment", action="store_true")
     args = parser.parse_args()
 
     cfg = ClipDatasetConfig(
@@ -324,6 +490,7 @@ if __name__ == "__main__":
         training=not args.eval,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        use_augmentation=args.augment,
     )
     loader = build_clip_dataloader(cfg)
 

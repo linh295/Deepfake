@@ -10,6 +10,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from dataloader.dataset import ClipDatasetConfig, build_clip_dataloader
 from training.spatio_temporal_detector import ModelConfig, SpatioTemporalDeepfakeDetector
 from training.utils.class_balance import ClassBalanceInfo
+from training.utils.losses import BinaryFocalLossWithLogits
 
 if TYPE_CHECKING:
     from training.train import TrainConfig
@@ -28,6 +29,17 @@ def build_dataloaders(cfg: "TrainConfig") -> tuple[Any, Any]:
         pin_memory=cfg.pin_memory,
         persistent_workers=cfg.persistent_workers,
         drop_last=False,
+        use_augmentation=cfg.use_augmentation,
+        augment_recompute_diff=cfg.augment_recompute_diff,
+        hflip_prob=cfg.hflip_prob,
+        brightness=cfg.brightness,
+        contrast=cfg.contrast,
+        jpeg_prob=cfg.jpeg_prob,
+        jpeg_quality_min=cfg.jpeg_quality_min,
+        jpeg_quality_max=cfg.jpeg_quality_max,
+        blur_prob=cfg.blur_prob,
+        blur_sigma_min=cfg.blur_sigma_min,
+        blur_sigma_max=cfg.blur_sigma_max,
     )
     val_ds_cfg = ClipDatasetConfig(
         shard_pattern=cfg.val_shards,
@@ -41,6 +53,7 @@ def build_dataloaders(cfg: "TrainConfig") -> tuple[Any, Any]:
         pin_memory=cfg.pin_memory,
         persistent_workers=cfg.persistent_workers,
         drop_last=False,
+        use_augmentation=False,
     )
     train_loader = build_clip_dataloader(train_ds_cfg)
     val_loader = build_clip_dataloader(val_ds_cfg)
@@ -78,6 +91,13 @@ def build_loss(
     device: torch.device,
     class_balance_info: ClassBalanceInfo | None = None,
 ) -> nn.Module:
+    if cfg.loss_type == "focal":
+        return BinaryFocalLossWithLogits(
+            alpha=cfg.focal_alpha,
+            gamma=cfg.focal_gamma,
+            reduction="mean",
+        )
+
     if (
         cfg.use_pos_weight
         and cfg.auto_pos_weight
@@ -90,6 +110,7 @@ def build_loss(
             device=device,
         )
         return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
     return nn.BCEWithLogitsLoss()
 
 

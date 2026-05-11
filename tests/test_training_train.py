@@ -511,6 +511,7 @@ class TrainModuleTestCase(unittest.TestCase):
             figure_dir=figure_dir,
             warmup_epochs=1,
             latest_bundle=True,
+            invert_binary_labels=False,
         )
 
         expected_stems = (
@@ -560,6 +561,7 @@ class TrainModuleTestCase(unittest.TestCase):
             figure_dir=figure_dir,
             warmup_epochs=3,
             latest_bundle=False,
+            invert_binary_labels=False,
         )
 
         for stem in (

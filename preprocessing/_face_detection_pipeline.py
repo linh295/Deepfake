@@ -1278,7 +1278,7 @@ def parse_args() -> argparse.Namespace:
         choices=[".jpg", ".jpeg", ".png"],
         help="Encoded image format stored inside shard",
     )
-    parser.add_argument("--jpeg-quality", type=int, default=95, help="JPEG quality if using jpg/jpeg output")
+    parser.add_argument("--jpeg-quality", type=int, default=100, help="JPEG quality if using jpg/jpeg output")
     parser.add_argument("--shard-maxcount", type=int, default=10000, help="Maximum samples per shard")
     parser.add_argument(
         "--shard-maxsize",

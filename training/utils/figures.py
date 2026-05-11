@@ -66,6 +66,7 @@ def render_training_figures(
     figure_dir: Path | str,
     warmup_epochs: int,
     latest_bundle: bool,
+    invert_binary_labels: bool,
 ) -> None:
     figure_dir = Path(figure_dir)
     figure_dir.mkdir(parents=True, exist_ok=True)
@@ -90,13 +91,21 @@ def render_training_figures(
         figure_dir=figure_dir,
         latest_bundle=latest_bundle,
         current_epoch=current_epoch,
+        invert_binary_labels=invert_binary_labels,
     )
     _render_validation_score_distribution(
         diagnostics=diagnostics,
         figure_dir=figure_dir,
         latest_bundle=latest_bundle,
         current_epoch=current_epoch,
+        invert_binary_labels=invert_binary_labels,
     )
+
+
+def _class_name_by_label(invert_binary_labels: bool) -> dict[int, str]:
+    if invert_binary_labels:
+        return {0: "fake", 1: "real"}
+    return {0: "real", 1: "fake"}
 
 
 def _figure_summary_text(
@@ -326,16 +335,18 @@ def _render_validation_confusion(
     figure_dir: Path,
     latest_bundle: bool,
     current_epoch: int,
+    invert_binary_labels: bool,
 ) -> None:
     plt = _load_pyplot()
     fig, ax = plt.subplots(figsize=(6.3, 5.5), constrained_layout=True)
     fig.patch.set_facecolor("white")
 
     matrix = confusion_matrix(diagnostics.labels, diagnostics.preds, labels=[0, 1])
+    class_names = _class_name_by_label(invert_binary_labels)
     image = ax.imshow(matrix, cmap="Blues")
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_xticks([0, 1], labels=["real", "fake"])
-    ax.set_yticks([0, 1], labels=["real", "fake"])
+    ax.set_xticks([0, 1], labels=[class_names[0], class_names[1]])
+    ax.set_yticks([0, 1], labels=[class_names[0], class_names[1]])
     ax.set_xlabel("Predicted")
     ax.set_ylabel("Actual")
     ax.set_title(f"Validation Confusion Matrix | epoch {current_epoch}", fontsize=14)
@@ -358,13 +369,15 @@ def _render_validation_score_distribution(
     figure_dir: Path,
     latest_bundle: bool,
     current_epoch: int,
+    invert_binary_labels: bool,
 ) -> None:
     plt = _load_pyplot()
     fig, ax = plt.subplots(figsize=(8, 5.5), constrained_layout=True)
     fig.patch.set_facecolor("white")
 
     bins = np.linspace(0.0, 1.0, 21)
-    class_labels = {0: ("real", "#2563eb"), 1: ("fake", "#ea580c")}
+    class_names = _class_name_by_label(invert_binary_labels)
+    class_labels = {0: (class_names[0], "#2563eb"), 1: (class_names[1], "#ea580c")}
     has_any_hist = False
     for class_id, (label_name, color) in class_labels.items():
         class_probs = diagnostics.probs[diagnostics.labels == class_id]

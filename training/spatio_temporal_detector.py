@@ -16,9 +16,9 @@ class ModelConfig:
     num_classes: int = 1
     temporal_in_channels: int = 3
     temporal_num_frames: int = 7
-    temporal_feature_dim: int = 256
-    fusion_hidden_dim: int = 512
-    dropout: float = 0.3
+    temporal_feature_dim: int = 512
+    fusion_hidden_dim: int = 1024
+    dropout: float = 0.5
     pretrained: bool = True
     freeze_spatial_backbone: bool = False
     temporal_pool: Literal["mean", "attention"] = "mean"

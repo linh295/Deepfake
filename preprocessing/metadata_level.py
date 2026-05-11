@@ -14,13 +14,12 @@ from tqdm import tqdm
 
 
 CATEGORY_TO_BINARY_LABEL: Dict[str, int] = {
-    "original": 0,
-    "DeepFakeDetection": 1,
-    "Deepfakes": 1,
-    "Face2Face": 1,
-    "FaceShifter": 1,
-    "FaceSwap": 1,
-    "NeuralTextures": 1,
+    "original": 1,
+    "Deepfakes": 0,
+    "Face2Face": 0,
+    "FaceShifter": 0,
+    "FaceSwap": 0,
+    "NeuralTextures": 0,
 }
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
