@@ -197,6 +197,10 @@ Các trường thường có trong `run`:
 - `class_balance`
 - `use_pos_weight`
 - `auto_pos_weight`
+- `model_dropout`
+- `temporal_pool`
+- `use_spatial_attention`
+- `use_texture_enhancement`
 
 Các trường thường có trong từng dòng `train` và `val`:
 
@@ -211,6 +215,7 @@ Trường bổ sung cho validation:
 - `selection_metric`
 - `selection_metric_name`
 - `learning_rates`
+- `phase`
 
 ### Checkpoint `.pt`
 

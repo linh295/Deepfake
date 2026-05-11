@@ -94,8 +94,8 @@ Lặp lại các bước frame, face, và clip cho `val` và `test` khi chuẩn 
 
 Huấn luyện sử dụng clip shard và xây dựng detector gồm:
 
-- nhánh không gian dựa trên `ResNet50`
-- CNN thời gian trên `diff.npy`
+- nhánh không gian dựa trên `ResNet50`, có spatial attention và texture enhancement mặc định
+- CNN thời gian trên `diff.npy`, hỗ trợ mean pooling hoặc attention pooling
 - fusion head cho bài toán phân loại nhị phân
 
 Lệnh train ví dụ:
@@ -104,18 +104,33 @@ Lệnh train ví dụ:
 python -m training.train --train-shards "clip_data/train/shard-*.tar" --val-shards "clip_data/val/shard-*.tar" --output-dir artifacts/experiments/st_detector
 ```
 
+Ví dụ bật augmentation, attention pooling, và focal loss:
+
+```bash
+python -m training.train \
+  --train-shards "clip_data/train/shard-*.tar" \
+  --val-shards "clip_data/val/shard-*.tar" \
+  --use-augmentation \
+  --temporal-pool attention \
+  --loss-type focal
+```
+
 Hành vi runtime quan trọng:
 
 - nhánh thời gian kỳ vọng `clip_len - 1` frame thời gian từ `diff.npy`
 - nhánh không gian có thể bị đóng băng trong warmup thông qua `--spatial-freeze-warmup-epochs`
 - độ lệch lớp có thể được ước tính từ training shard và chuyển thành `pos_weight`
+- augmentation nếu bật được áp dụng nhất quán trên toàn bộ clip và có thể recompute `diff.npy`
+- loss mặc định là `BCEWithLogitsLoss`; có thể đổi sang focal loss qua `--loss-type focal`
 - việc chọn checkpoint ưu tiên validation AUC, và fallback sang negative validation loss khi AUC không xác định
+- early stopping dựa trên metric chọn checkpoint
 
 Đầu ra huấn luyện:
 
 - `artifacts/experiments/st_detector/history.json`
 - `artifacts/experiments/st_detector/best.pt`
 - `artifacts/experiments/st_detector/checkpoint_epoch_*.pt`
+- `figures/<run>/latest/` và `figures/<run>/best/` khi render figure thành công
 
 ## Tổng Quan Đầu Ra
 

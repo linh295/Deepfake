@@ -156,10 +156,20 @@ Sự tách biệt giữa align canvas và output cuối giúp giữ thêm bối 
 Stack training sử dụng detector hai nhánh:
 
 - nhánh không gian: frame RGB đã normalize đưa qua `ResNet50`
-- nhánh thời gian: chuỗi frame-difference đã normalize đưa qua CNN nhẹ
+- nhánh thời gian: chuỗi frame-difference đã normalize đưa qua CNN residual nhẹ
 - fusion head: nối đặc trưng rồi đưa qua MLP classifier
 
 Nhánh thời gian kỳ vọng `clip_len - 1` bước vì `diff.npy` lưu hiệu của các cặp frame liên tiếp.
+
+Chi tiết hiện tại:
+
+- `SpatialResNet50` xuất đặc trưng 2048 chiều.
+- Texture enhancement lấy feature nông từ `layer1`, project lên 2048 kênh, resize về kích thước feature semantic, rồi fuse bằng `1x1 conv`.
+- Spatial attention sinh một attention map một kênh bằng `1x1 conv` và nhân với feature map trước global average pooling.
+- `TemporalDiffCNN` encode từng frame-difference độc lập, project về feature 256 chiều trong cấu hình train mặc định, sau đó pool theo thời gian bằng mean hoặc attention.
+- `FusionHead` nối vector không gian và thời gian, dùng MLP với dropout, và trả về một logit cho bài toán nhị phân.
+
+Khi gọi `return_features=True`, detector trả thêm các tensor phục vụ debug/visualization như `spatial_feat`, `temporal_feat`, attention map không gian, feature map trung gian, và temporal attention nếu có.
 
 ## Đánh Giá Và Checkpointing
 
@@ -176,3 +186,10 @@ Việc chọn checkpoint sử dụng validation AUC nếu có, và fallback sang
 - model config
 - metadata class-balance
 - optimizer, scheduler, scaler, và RNG state
+
+Training loop có thêm:
+
+- freeze warmup cho nhánh không gian trước khi full fine-tune
+- `ReduceLROnPlateau` chạy trên cùng selection metric với checkpoint
+- early stopping khi metric không cải thiện đủ lâu
+- render figure summary theo epoch vào thư mục `figures/` nếu môi trường hỗ trợ

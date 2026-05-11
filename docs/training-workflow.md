@@ -42,7 +42,20 @@ Các argument tùy chọn thường dùng:
 - `--disable-pos-weight`
 - `--disable-auto-pos-weight`
 - `--max-pos-weight`
+- `--model-dropout`
+- `--temporal-pool {mean,attention}`
+- `--disable-spatial-attention`
+- `--disable-texture-enhancement`
 - `--spatial-freeze-warmup-epochs`
+- `--early-stopping-patience`
+- `--use-augmentation`
+- `--disable-augment-recompute-diff`
+- `--hflip-prob`
+- `--brightness`
+- `--contrast`
+- `--loss-type {bce,focal}`
+- `--focal-alpha`
+- `--focal-gamma`
 
 ## Ngữ Nghĩa Của Mô Hình Và Batch
 
@@ -59,16 +72,42 @@ Giả định quan trọng:
 - validation chọn center frame một cách xác định
 - training lấy mẫu spatial frame từ tập candidate center index
 
+Nhánh không gian:
+
+- dùng torchvision `ResNet50` với weight ImageNet khi train qua CLI
+- xuất vector đặc trưng 2048 chiều
+- mặc định bật texture enhancement từ feature nông và spatial attention trên feature map đã fuse
+- có thể tắt từng phần bằng `--disable-texture-enhancement` và `--disable-spatial-attention`
+
+Nhánh thời gian:
+
+- nhận tensor shape `[B, T-1, 3, H, W]`
+- encode từng frame-difference bằng CNN residual nhẹ
+- xuất vector đặc trưng 256 chiều khi được build từ `training.train`
+- pooling mặc định là mean; `--temporal-pool attention` bật attention theo thời gian
+
+Fusion head:
+
+- nối đặc trưng không gian và thời gian
+- dùng MLP với dropout để sinh một binary logit cho mỗi sample
+
 ## Hành Vi Tối Ưu
 
 Huấn luyện hiện tại sử dụng:
 
 - `AdamW`
-- `BCEWithLogitsLoss`
+- `BCEWithLogitsLoss` mặc định hoặc focal loss khi `--loss-type focal`
 - `pos_weight` tùy chọn được suy ra từ class balance
 - `ReduceLROnPlateau` với `mode="max"`
 - gradient clipping
 - AMP trên CUDA theo mặc định
+- early stopping theo selection metric
+
+Optimizer dùng learning rate tách theo nhánh:
+
+- `--lr-spatial`
+- `--lr-temporal`
+- `--lr-fusion`
 
 Chọn checkpoint:
 
@@ -79,6 +118,13 @@ Hành vi warmup:
 
 - nhánh không gian bị đóng băng trong `spatial_freeze_warmup_epochs` đầu tiên
 - sau warmup, toàn bộ detector được fine-tune
+
+Augmentation:
+
+- chỉ áp dụng cho train loader khi bật `--use-augmentation`
+- cùng một bộ transform được áp dụng cho toàn clip để giữ tính nhất quán thời gian
+- hỗ trợ horizontal flip, brightness, và contrast
+- mặc định recompute frame-difference từ RGB đã augment; có thể tắt bằng `--disable-augment-recompute-diff`
 
 ## Đầu Ra
 
@@ -91,8 +137,9 @@ Tệp được tạo:
 - `history.json`
 - `best.pt`
 - `checkpoint_epoch_*.pt`
+- figure summary trong thư mục `figures/` khi render thành công
 
-`history.json` lưu metric theo epoch và thông tin selection metric. Mỗi checkpoint cũng bao gồm optimizer, scheduler, scaler, config, class-balance, và RNG state.
+`history.json` lưu metric theo epoch, learning rate hiện tại, phase huấn luyện, tùy chọn model, và thông tin selection metric. Mỗi checkpoint cũng bao gồm optimizer, scheduler, scaler, config, class-balance, và RNG state.
 
 ## Xác Thực Và Debug
 
