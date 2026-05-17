@@ -28,7 +28,8 @@ class ResidualBlock(nn.Module):
 
 class TemporalDiffCNN(nn.Module):
     """
-    Temporal branch for frame differences.
+    Temporal branch for frame differences optimized with Bidirectional GRU 
+    to capture long-range temporal logic under low FPS (5 FPS).
 
     Input shape:
         [B, T, C, H, W]
@@ -40,16 +41,22 @@ class TemporalDiffCNN(nn.Module):
         self,
         in_channels: int = 3,
         feature_dim: int = 512,
-        pool_mode: Literal["mean", "attention"] = "mean",
+        pool_mode: Literal["mean", "attention", "gru"] = "gru",  # Đặt mặc định là gru
         dropout: float = 0.3,
+        gru_hidden_dim: int = 256,
+        gru_layers: int = 2,
     ) -> None:
         super().__init__()
-        if pool_mode not in {"mean", "attention"}:
+        # Mở rộng hỗ trợ pool_mode để tránh lỗi tương thích nếu config truyền vào
+        if pool_mode not in {"mean", "attention", "gru"}:
             raise ValueError(f"Unsupported pool_mode={pool_mode}")
 
         self.pool_mode = pool_mode
         self.feature_dim = feature_dim
+        self.gru_hidden_dim = gru_hidden_dim
+        self.gru_layers = gru_layers
 
+        # Backbone trích xuất đặc trưng từng khung hình (Giữ nguyên cấu trúc của bạn)
         self.frame_encoder = nn.Sequential(
             nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(64),
@@ -58,26 +65,50 @@ class TemporalDiffCNN(nn.Module):
             
             ResidualBlock(64, 128, stride=2),
             ResidualBlock(128, 256, stride=2),
-            ResidualBlock(256, 512, stride=2), # Output channel là 512
+            ResidualBlock(256, 512, stride=2),
             
             nn.AdaptiveAvgPool2d((1, 1)),
         )
 
+        # Bộ chiếu đặc trưng không gian (Giữ nguyên cấu trúc của bạn)
         self.proj = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(512, feature_dim), # Khớp với output của encoder
+            nn.Linear(512, feature_dim),
             nn.BatchNorm1d(feature_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
         )
 
-        if self.pool_mode == "attention":
+        # Cấu hình nhánh tuần tự thời gian dựa trên chế độ pool_mode
+        if self.pool_mode == "gru":
+            # Khởi tạo Bidirectional GRU đa tầng
+            self.gru = nn.GRU(
+                input_size=feature_dim,
+                hidden_size=gru_hidden_dim,
+                num_layers=gru_layers,
+                batch_first=True,
+                bidirectional=True,
+                dropout=dropout if gru_layers > 1 else 0.0,
+            )
+            # Lớp tuyến tính gộp output 2 chiều (gru_hidden_dim * 2) về lại kích thước feature_dim cho Fusion
+            self.gru_proj = nn.Sequential(
+                nn.Linear(gru_hidden_dim * 2, feature_dim),
+                nn.BatchNorm1d(feature_dim),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+            )
+            self.attention = None
+        elif self.pool_mode == "attention":
+            self.gru = None
+            self.gru_proj = None
             self.attention = nn.Sequential(
                 nn.Linear(feature_dim, feature_dim // 2),
                 nn.Tanh(),
                 nn.Linear(feature_dim // 2, 1),
             )
         else:
+            self.gru = None
+            self.gru_proj = None
             self.attention = None
 
     def forward(
@@ -86,23 +117,47 @@ class TemporalDiffCNN(nn.Module):
         return_attention: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         b, t, c, h, w = x.shape
+        
+        # 1. Trích xuất đặc trưng không gian trên từng frame độc lập
         x = x.reshape(b * t, c, h, w)
         x = self.frame_encoder(x)
         x = self.proj(x)
-        x = x.reshape(b, t, self.feature_dim)
+        x = x.reshape(b, t, self.feature_dim) # Shape: [B, T, feature_dim]
 
+        # ---- CHẾ ĐỘ GRU (MỚI TỐI ƯU HÓA) ----
+        if self.pool_mode == "gru":
+            # gru_out shape: [B, T, gru_hidden_dim * 2]
+            # hn shape: [num_layers * 2, B, gru_hidden_dim]
+            gru_out, hn = self.gru(x)
+            
+            # Trích xuất trạng thái ẩn cuối cùng của cả 2 chiều:
+            # Chiều xuôi (Forward): Lấy bước thời gian cuối cùng của nửa đầu hidden_dim -> gru_out[:, -1, :gru_hidden_dim]
+            # Chiều ngược (Backward): Lấy bước thời gian đầu tiên của nửa sau hidden_dim -> gru_out[:, 0, gru_hidden_dim:]
+            # Thay vì trích xuất thủ công phức tạp từ gru_out, cấu trúc hn cho phép ta lấy trực tiếp:
+            # hn[-2] là tầng cuối cùng của chiều xuôi, hn[-1] là tầng cuối cùng của chiều ngược.
+            
+            feat_forward = hn[-2]   # Shape: [B, gru_hidden_dim]
+            feat_backward = hn[-1]  # Shape: [B, gru_hidden_dim]
+            
+            # Khôi phục liên kết không gian bằng cách ghép cặp đặc trưng 2 chiều
+            pooled = torch.cat([feat_forward, feat_backward], dim=-1) # Shape: [B, gru_hidden_dim * 2]
+            pooled = self.gru_proj(pooled) # Hạ chiều về lại [B, feature_dim]
+
+            if return_attention:
+                # Trả về ma trận trọng số đồng nhất làm dummy data để không gây lỗi crash luồng code cũ
+                dummy_attn = torch.full((b, t, 1), fill_value=1.0 / max(1, t), dtype=x.dtype, device=x.device)
+                return pooled, dummy_attn
+            return pooled
+
+        # ---- CÁC CHẾ ĐỘ CŨ (ĐỂ BẢO TOÀN COMPATIBILITY) ----
         if self.pool_mode == "mean":
             pooled = x.mean(dim=1)
             if return_attention:
-                uniform_attn = torch.full(
-                    (b, t, 1),
-                    fill_value=1.0 / max(1, t),
-                    dtype=x.dtype,
-                    device=x.device,
-                )
+                uniform_attn = torch.full((b, t, 1), fill_value=1.0 / max(1, t), dtype=x.dtype, device=x.device)
                 return pooled, uniform_attn
             return pooled
 
+        # Chế độ Attention cũ
         attn_logits = self.attention(x)
         attn_weights = torch.softmax(attn_logits, dim=1)
         pooled = (x * attn_weights).sum(dim=1)

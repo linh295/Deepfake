@@ -25,7 +25,9 @@ class BinaryFocalLossWithLogits(nn.Module):
         self.reduction = reduction
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        smoothing = 0.1
         targets = targets.float()
+        targets = targets * (1.0 - smoothing) + 0.5 * smoothing
 
         bce = F.binary_cross_entropy_with_logits(
             logits,

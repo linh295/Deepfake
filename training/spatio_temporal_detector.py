@@ -21,7 +21,7 @@ class ModelConfig:
     dropout: float = 0.5
     pretrained: bool = True
     freeze_spatial_backbone: bool = False
-    temporal_pool: Literal["mean", "attention"] = "mean"
+    temporal_pool: Literal["mean", "attention", "gru"] = "mean"
     use_spatial_attention: bool = True
     use_texture_enhancement: bool = True
 

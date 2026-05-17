@@ -50,7 +50,7 @@ class TrainConfig:
     max_pos_weight: float | None = None
 
     model_dropout: float = 0.3
-    temporal_pool: str = "mean"
+    temporal_pool: str = "gru"
     use_spatial_attention: bool = True
     use_texture_enhancement: bool = True
 
@@ -111,7 +111,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--max-pos-weight", type=float, default=None)
 
     parser.add_argument("--model-dropout", type=float, default=0.3)
-    parser.add_argument("--temporal-pool", type=str, choices=["mean", "attention"], default="mean")
+    parser.add_argument("--temporal-pool", type=str, choices=["mean", "attention", "gru"], default="gru")
     parser.add_argument("--disable-spatial-attention", action="store_true")
     parser.add_argument("--disable-texture-enhancement", action="store_true")
 

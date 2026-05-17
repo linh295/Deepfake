@@ -59,4 +59,5 @@ Thumbs.db
 frame_data/
 models/
 FaceForensics++_C23/
+FaceForensics++_C40/
 .tmp-tests/
