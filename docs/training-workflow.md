@@ -1,35 +1,34 @@
-# Quy Trình Huấn Luyện
+# Quy Trinh Huan Luyen Va Danh Gia
 
-## Tổng Quan
+## Tong Quan
 
-Huấn luyện tiêu thụ clip-level WebDataset shard được tạo bởi `preprocessing.build_clips` và huấn luyện một detector nhị phân spatio-temporal.
+Training tieu thu clip-level WebDataset shard tu `preprocessing.build_clips` va huan luyen detector nhi phan spatio-temporal.
 
-Entrypoint chính:
+Entrypoint:
 
-- [training/train.py](../training/train.py)
+- [training/train.py](../training/train.py): train/validate/checkpoint.
+- [training/test.py](../training/test.py): evaluate test set voi threshold thu cong.
+- [training/test_with_best_threshold.py](../training/test_with_best_threshold.py): evaluate va tim threshold theo metric.
 
-Các stage huấn luyện chính:
+## Train Input
 
-1. tạo train dataloader và validation dataloader từ clip shard
-2. suy ra metadata class-balance nếu cần từ training shard
-3. tạo detector hai nhánh
-4. train và validate theo từng epoch
-5. ghi history và checkpoint
-
-## Đầu Vào
-
-CLI argument bắt buộc:
+Bat buoc:
 
 - `--train-shards`
 - `--val-shards`
 
-Lệnh sử dụng thông thường:
+Lenh co ban:
 
 ```bash
-python -m training.train --train-shards "clip_data/train/shard-*.tar" --val-shards "clip_data/val/shard-*.tar"
+python -m training.train \
+  --train-shards "clip_data/train/shard-*.tar" \
+  --val-shards "clip_data/val/shard-*.tar" \
+  --output-dir artifacts/experiments/st_detector
 ```
 
-Các argument tùy chọn thường dùng:
+## Tham So CLI Chinh
+
+Du lieu va runtime:
 
 - `--output-dir`
 - `--epochs`
@@ -37,122 +36,267 @@ Các argument tùy chọn thường dùng:
 - `--num-workers`
 - `--clip-len`
 - `--device`
+- `--seed`
 - `--disable-amp`
+- `--disable-pin-memory`
+- `--disable-persistent-workers`
+- `--train-shuffle-buffer`
+- `--log-every`
+- `--save-every`
+
+Label va class balance:
+
 - `--invert-binary-labels`
 - `--disable-pos-weight`
 - `--disable-auto-pos-weight`
 - `--max-pos-weight`
+
+Optimizer/scheduler:
+
+- `--lr-spatial`
+- `--lr-temporal`
+- `--lr-fusion`
+- `--weight-decay`
+- `--grad-clip-norm`
+- `--scheduler-factor`
+- `--scheduler-patience`
+- `--scheduler-threshold`
+- `--scheduler-min-lr`
+
+Model:
+
 - `--model-dropout`
-- `--temporal-pool {mean,attention}`
+- `--temporal-pool {mean,attention,gru}`
 - `--disable-spatial-attention`
 - `--disable-texture-enhancement`
 - `--spatial-freeze-warmup-epochs`
-- `--early-stopping-patience`
+
+Augmentation:
+
 - `--use-augmentation`
 - `--disable-augment-recompute-diff`
 - `--hflip-prob`
 - `--brightness`
 - `--contrast`
+- `--jpeg-prob`
+- `--jpeg-quality-min`
+- `--jpeg-quality-max`
+- `--blur-prob`
+- `--blur-sigma-min`
+- `--blur-sigma-max`
+
+Loss va early stopping:
+
 - `--loss-type {bce,focal}`
 - `--focal-alpha`
 - `--focal-gamma`
+- `--early-stopping-patience`
 
-## Ngữ Nghĩa Của Mô Hình Và Batch
+## Label
 
-Detector gồm:
+Manifest hien tai gan `original=1`, manipulation `=0`. Training su dung label trong shard. Neu muon doi positive class theo quy uoc nguoc lai, chay train/test voi:
 
-- một nhánh không gian trên một frame RGB của mỗi clip
-- một nhánh thời gian trên frame difference
-- một fusion head để sinh binary logits
+```bash
+--invert-binary-labels
+```
 
-Giả định quan trọng:
+Nen dung cung mot quy uoc invert cho train, validation va test.
 
-- `rgb.npy` phải có `clip_len` frame
-- `diff.npy` phải có `clip_len - 1` frame
-- validation chọn center frame một cách xác định
-- training lấy mẫu spatial frame từ tập candidate center index
+## Batch Contract
 
-Nhánh không gian:
+Moi batch tu dataloader gom:
 
-- dùng torchvision `ResNet50` với weight ImageNet khi train qua CLI
-- xuất vector đặc trưng 2048 chiều
-- mặc định bật texture enhancement từ feature nông và spatial attention trên feature map đã fuse
-- có thể tắt từng phần bằng `--disable-texture-enhancement` và `--disable-spatial-attention`
+- `spatial`: tensor `(B, 3, H, W)`, mot frame RGB da normalize ImageNet.
+- `temporal`: tensor `(B, T-1, 3, H, W)`, frame difference scale ve `[0, 1]`.
+- `label`: tensor `(B,)`.
+- `spatial_index`: index frame RGB duoc chon tu clip.
+- `meta`: metadata JSON cua clip.
 
-Nhánh thời gian:
+Train mode chon ngau nhien mot index trong `center_candidate_indices`; validation/test dung `default_center_index` neu co.
 
-- nhận tensor shape `[B, T-1, 3, H, W]`
-- encode từng frame-difference bằng CNN residual nhẹ
-- xuất vector đặc trưng 256 chiều khi được build từ `training.train`
-- pooling mặc định là mean; `--temporal-pool attention` bật attention theo thời gian
+## Mo Hinh
+
+Detector:
+
+```text
+spatial RGB frame -> SpatialResNet50 -> spatial feature 2048
+diff sequence     -> TemporalDiffCNN -> temporal feature 256
+concat features   -> FusionHead      -> binary logit
+```
+
+Spatial branch:
+
+- ResNet50 ImageNet.
+- Texture enhancement mac dinh bat.
+- Spatial attention mac dinh bat.
+- Co the freeze trong warmup bang `--spatial-freeze-warmup-epochs`.
+
+Temporal branch:
+
+- Input la `diff.npy`, do dai `clip_len - 1`.
+- CNN residual encode tung timestep.
+- `--temporal-pool mean`: average theo thoi gian.
+- `--temporal-pool attention`: learned attention theo timestep.
+- `--temporal-pool gru`: bidirectional GRU tren chuoi feature; day la mac dinh cua CLI train hien tai.
 
 Fusion head:
 
-- nối đặc trưng không gian và thời gian
-- dùng MLP với dropout để sinh một binary logit cho mỗi sample
+- MLP hai hidden layer voi dropout.
+- Tra ve mot logit; xac suat duoc tinh bang sigmoid khi evaluate.
 
-## Hành Vi Tối Ưu
+## Loss, Optimizer Va Scheduler
 
-Huấn luyện hiện tại sử dụng:
+Mac dinh:
 
-- `AdamW`
-- `BCEWithLogitsLoss` mặc định hoặc focal loss khi `--loss-type focal`
-- `pos_weight` tùy chọn được suy ra từ class balance
-- `ReduceLROnPlateau` với `mode="max"`
-- gradient clipping
-- AMP trên CUDA theo mặc định
-- early stopping theo selection metric
+- optimizer: `AdamW`
+- loss: `BCEWithLogitsLoss`
+- scheduler: `ReduceLROnPlateau(mode="max")`
+- AMP: bat tren CUDA
+- gradient clipping: bat theo `--grad-clip-norm`
 
-Optimizer dùng learning rate tách theo nhánh:
+Learning rate tach theo nhanh:
 
 - `--lr-spatial`
 - `--lr-temporal`
 - `--lr-fusion`
 
-Chọn checkpoint:
+Class balance:
 
-- dùng validation AUC khi có thể tính được
-- ngược lại dùng negative validation loss
+- Neu `use_pos_weight` va `auto_pos_weight` bat, training scan train shard de tinh `pos_weight`.
+- `--max-pos-weight` co the gioi han trong so positive.
+- Focal loss khong dung `pos_weight`.
 
-Hành vi warmup:
+## Augmentation
 
-- nhánh không gian bị đóng băng trong `spatial_freeze_warmup_epochs` đầu tiên
-- sau warmup, toàn bộ detector được fine-tune
+Augmentation chi ap dung cho train loader khi co `--use-augmentation`.
 
-Augmentation:
+Nguyen tac:
 
-- chỉ áp dụng cho train loader khi bật `--use-augmentation`
-- cùng một bộ transform được áp dụng cho toàn clip để giữ tính nhất quán thời gian
-- hỗ trợ horizontal flip, brightness, và contrast
-- mặc định recompute frame-difference từ RGB đã augment; có thể tắt bằng `--disable-augment-recompute-diff`
+- Mot bo tham so transform duoc sample cho ca clip, giu nhat quan thoi gian.
+- Horizontal flip, brightness va contrast chay tren tensor clip.
+- Gaussian blur va JPEG compression co the bat bang probability rieng.
+- Mac dinh recompute `diff.npy` tu RGB da augment de temporal input khop voi spatial input.
+- Dung `--disable-augment-recompute-diff` neu muon giu diff goc.
 
-## Đầu Ra
+Vi du:
 
-Thư mục output mặc định:
+```bash
+python -m training.train \
+  --train-shards "clip_data/train/shard-*.tar" \
+  --val-shards "clip_data/val/shard-*.tar" \
+  --use-augmentation \
+  --hflip-prob 0.5 \
+  --brightness 0.1 \
+  --contrast 0.1 \
+  --jpeg-prob 0.2 \
+  --blur-prob 0.1
+```
+
+## Checkpoint Selection
+
+Moi epoch:
+
+1. Train mot epoch.
+2. Validate mot epoch.
+3. Tinh selection metric.
+4. Step scheduler.
+5. Ghi checkpoint theo `--save-every`.
+6. Cap nhat `best.pt` neu metric tot hon.
+7. Ghi `history.json`.
+8. Render figures neu moi truong ho tro.
+
+Selection metric:
+
+- `val_auc` neu validation co ca hai lop.
+- `-val_loss` neu AUC khong tinh duoc.
+
+Early stopping dung cung selection metric va `--early-stopping-patience`.
+
+## Train Output
+
+Thu muc mac dinh:
 
 - `artifacts/experiments/st_detector`
 
-Tệp được tạo:
+File:
 
 - `history.json`
 - `best.pt`
 - `checkpoint_epoch_*.pt`
-- figure summary trong thư mục `figures/` khi render thành công
 
-`history.json` lưu metric theo epoch, learning rate hiện tại, phase huấn luyện, tùy chọn model, và thông tin selection metric. Mỗi checkpoint cũng bao gồm optimizer, scheduler, scaler, config, class-balance, và RNG state.
+Figure:
 
-## Xác Thực Và Debug
+- `figures/<run>/latest/`
+- `figures/<run>/best/epoch_*/`
 
-Kiểm tra khuyến nghị:
+`history.json` gom:
+
+- `run`: class balance, pos_weight option, model option.
+- `train`: metric train theo epoch.
+- `val`: metric val, selection metric, learning rates va phase.
+
+Checkpoint gom:
+
+- `epoch`
+- `model_state`
+- `optimizer_state`
+- `scheduler_state`
+- `scaler_state`
+- `best_val_auc`
+- `best_selection_metric`
+- `train_config`
+- `model_config`
+- `class_balance`
+- `rng_state`
+
+## Danh Gia Test
+
+Evaluate voi threshold thu cong:
+
+```bash
+python -m training.test \
+  --test-shards "clip_data/test/shard-*.tar" \
+  --checkpoint artifacts/experiments/st_detector/best.pt \
+  --output-dir artifacts/test_results \
+  --threshold 0.5
+```
+
+Evaluate va tim threshold:
+
+```bash
+python -m training.test_with_best_threshold \
+  --test-shards "clip_data/test/shard-*.tar" \
+  --checkpoint artifacts/experiments/st_detector/best.pt \
+  --output-dir artifacts/test_results \
+  --prediction-threshold-mode f1
+```
+
+`--prediction-threshold-mode` ho tro:
+
+- `manual`
+- `youden`
+- `f1`
+- `balanced_accuracy`
+
+Test output:
+
+- `test_metrics.json`: checkpoint metadata, metric, confusion matrix, label/pred distribution, threshold info.
+- `test_predictions.csv`: key, video_id, category, label, probability, pred, spatial_index.
+
+## Kiem Tra Va Debug
+
+Test lien quan:
 
 ```bash
 python -m unittest tests.test_dataset_loader tests.test_spatio_temporal_detector tests.test_training_train
 python -m compileall training dataloader tests
 ```
 
-Nếu training lỗi sớm, hãy kiểm tra:
+Neu train/test loi som, kiem tra:
 
-- glob của train shard và validation shard có resolve ra tệp `.tar` thực tế hay không
-- `clip_len` có khớp với clip shard đang được load hay không
-- device được chọn có sẵn sàng hay không
-- `torchvision` đã được cài đặt cho nhánh `ResNet50` hay chưa
+- shard glob co match file `.tar` khong
+- `--clip-len` co khop voi clip shard khong
+- label convention co can `--invert-binary-labels` khong
+- device co san sang khong
+- `torchvision` co cai dat dung voi `torch` khong
+- checkpoint co `model_config` tu training script hien tai khong

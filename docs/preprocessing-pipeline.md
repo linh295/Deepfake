@@ -1,157 +1,262 @@
-# Pipeline Tiền Xử Lý
+# Pipeline Tien Xu Ly
 
-## Tổng Quan
+## Tong Quan
 
-Thứ tự thực thi khuyến nghị:
+Pipeline tien xu ly tao du lieu theo tung tang:
 
-1. Tạo `videos_master.csv`
-2. Trích xuất frame
-3. Phát hiện khuôn mặt và ghi aligned frame shard
-4. Tạo clip từ aligned frame shard
+```text
+videos_master.csv
+  -> frame_extraction_metadata.csv + frame JPG
+  -> crop_data/<split>/shard-*.tar
+  -> clip_data/<split>/shard-*.tar
+```
 
-## 1. Tạo Metadata Cấp Video
+Nen chay theo split (`train`, `val`, `test`) sau khi manifest video da co de output tach bach va de resume de kiem soat.
+
+## 1. Tao Metadata Cap Video
 
 Script:
+
 - [metadata_level.py](../preprocessing/metadata_level.py)
 
-Mục đích:
-- quét thư mục dataset
-- lấy FPS và số frame
-- gán `train/val/test` một cách xác định, cân bằng trong từng category
-
-Ví dụ:
+Lenh:
 
 ```bash
-python -m preprocessing.metadata_level --dataset-dir FaceForensics++_C23 --output-dir artifacts --output-name videos_master
+python -m preprocessing.metadata_level \
+  --dataset-dir FaceForensics++_C23 \
+  --output-dir artifacts \
+  --output-name videos_master
 ```
 
-Đầu ra chính:
-- `artifacts/videos_master.csv`
+Tham so chinh:
 
-## 2. Trích Xuất Frame
+- `--dataset-dir`: thu muc dataset FaceForensics++ C23.
+- `--output-dir`: noi ghi manifest.
+- `--output-name`: ten file khong gom extension.
+- `--workers`: so worker doc metadata video.
+
+Dau ra:
+
+- `artifacts/videos_master.csv`
+- `artifacts/videos_master.parquet` neu co engine parquet phu hop
+
+Cot chinh:
+
+- `video_id`
+- `video_path`
+- `category`
+- `binary_label`
+- `compression`
+- `split`
+- `original_fps`
+- `num_frames`
+
+Quy uoc label hien tai:
+
+- `original = 1`
+- manipulation category = `0`
+
+Kiem tra split:
+
+```bash
+python -m preprocessing.analyze_videos_master --manifest artifacts/videos_master.csv
+```
+
+## 2. Trich Xuat Frame
 
 Script:
+
 - [frame_extractor.py](../preprocessing/frame_extractor.py)
 
-Mục đích:
-- đọc `videos_master.csv`
-- trích xuất frame theo target FPS
-- giữ thông tin split trên mỗi dòng frame
-- resume mặc định bằng cách dùng frame đã có cùng `frame_extraction_audit.csv`
-
-Ví dụ:
-
-Chỉ trích xuất dữ liệu train:
+Lenh train split:
 
 ```bash
-python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train
+python -m preprocessing.frame_extractor \
+  --manifest artifacts/videos_master.csv \
+  --split train
 ```
 
-Ép chạy lại sạch không dùng resume:
+Lenh chi mot category:
 
 ```bash
-python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train --no-resume
+python -m preprocessing.frame_extractor \
+  --manifest artifacts/videos_master.csv \
+  --category original
 ```
 
-Chỉ trích xuất một category:
+Rebuild metadata CSV tu frame da co:
 
 ```bash
-python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --category original
+python -m preprocessing.frame_extractor \
+  --manifest artifacts/videos_master.csv \
+  --rebuild-csv-only
 ```
 
-Đầu ra chính:
-- `frame_data/<category>/<video_name>/*.jpg`
+Chay lai sach khong resume:
+
+```bash
+python -m preprocessing.frame_extractor \
+  --manifest artifacts/videos_master.csv \
+  --split train \
+  --no-resume
+```
+
+Tham so thuong dung:
+
+- `--manifest`: `videos_master.csv`.
+- `--category`: loc category.
+- `--split`: loc split.
+- `--workers`: override so process.
+- `--fps`: override target FPS, mac dinh tu `settings.TARGET_FPS = 5`.
+- `--jpeg-quality`: override quality JPG.
+- `--no-resume`: reset metadata/audit cho lan chay moi.
+- `--rebuild-csv-only`: khong decode video, chi index frame san co.
+
+Dau ra:
+
+- `frame_data/<category>/<video_name>_frame_*.jpg`
 - `frame_data/frame_extraction_metadata.csv`
 - `frame_data/frame_extraction_audit.csv`
 
-## 3. Phát Hiện Khuôn Mặt Và Tạo Frame Shard
+Resume:
+
+- Mac dinh bat.
+- Audit key gom `category|video_id|split`.
+- Neu audit thieu nhung metadata/frame day du, script co the bootstrap lai audit.
+- Neu metadata thieu cho video da complete, script co the recover row tu frame da co.
+
+## 3. Phat Hien Va Can Chinh Khuon Mat
 
 Script:
+
 - [face_detection.py](../preprocessing/face_detection.py)
+- [_face_detection_pipeline.py](../preprocessing/_face_detection_pipeline.py)
 
-Mục đích:
-- detect khuôn mặt chính trên từng frame
-- căn chỉnh ảnh bằng 5 landmark
-- crop quanh bounding box đã căn chỉnh với mức context có thể cấu hình
-- ghi WebDataset shard cấp frame
-
-Ví dụ:
-
-Chạy cho một split:
+Lenh:
 
 ```bash
-python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split train
+python -m preprocessing.face_detection \
+  --metadata-csv frame_data/frame_extraction_metadata.csv \
+  --frame-root frame_data \
+  --output-dir crop_data \
+  --split train
 ```
 
-Chạy ba job độc lập:
+Tham so quan trong:
 
-```bash
-python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split train
-python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split val
-python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split test
-```
+- `--metadata-csv`: metadata frame tu stage truoc.
+- `--frame-root`: root de resolve `frame_path`.
+- `--output-dir`: root frame shard output.
+- `--category`: loc category.
+- `--split`: loc split va ghi output vao `output-dir/split`.
+- `--limit`: gioi han so row de test nhanh.
+- `--threshold`: nguong RetinaFace.
+- `--max-side`: resize anh truoc detection de canh dai nhat khong vuot qua gioi han.
+- `--aligned-width`, `--aligned-height`: kich thuoc crop output, mac dinh `224`.
+- `--crop-scale`: mo rong crop quanh bbox.
+- `--detect-every-k`: tan suat detect keyframe.
+- `--image-format`: `.jpg`, `.jpeg` hoac `.png`.
+- `--jpeg-quality`: quality neu ghi JPG.
+- `--shard-maxcount`, `--shard-maxsize`: nguong xoay shard.
+- `--skip-no-face`: giu semantic CLI cu; stage hien van chi ghi sample da align duoc.
+- `--audit-csv`: audit CSV goc; khi co `--split`, file audit se duoc ghi vao thu muc split.
 
-Hành vi quan trọng:
-
-- output tách riêng theo split khi có `--split`
-- audit CSV cũng tách riêng theo split
-- face crop được ghi theo streaming mode, không buffer theo từng video
-- alignment chạy trên một canvas vuông lớn hơn, sau đó crop cuối cùng mới được resize về `--aligned-width/--aligned-height`
-
-Đầu ra chính:
+Dau ra:
 
 - `crop_data/<split>/shard-*.tar`
 - `audit/<split>/face_detection_audit.csv`
 
-## 4. Tạo Clip Shard
+Moi sample shard gom:
+
+- `json`: metadata detection/alignment/crop
+- `jpg` hoac `png`: anh mat da can chinh
+- `cls`: label neu hop le
+
+Luu y van hanh:
+
+- Output duoc resume bang audit va scan shard da co.
+- Frame khong doc duoc hoac khong align duoc se khong tao sample.
+- `build_clips.py` yeu cau frame shard giu thu tu contiguous theo video.
+
+## 4. Tao Clip Shard
 
 Script:
+
 - [build_clips.py](../preprocessing/build_clips.py)
 
-Mục đích:
-- đọc aligned frame shard
-- tạo clip có độ dài cố định
-- lưu RGB clip và frame-difference clip
-- dùng `video_id` canonical của frame shard để group clip và đặt key
-
-Ví dụ:
+Lenh:
 
 ```bash
-python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split train
+python -m preprocessing.build_clips \
+  --input-dir crop_data \
+  --output-dir clip_data \
+  --split train
 ```
 
-Nếu output của split đó đã tồn tại clip shard, hãy chạy lại với `--overwrite` để rebuild sạch:
+Rebuild split da ton tai:
 
 ```bash
-python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split train --overwrite
+python -m preprocessing.build_clips \
+  --input-dir crop_data \
+  --output-dir clip_data \
+  --split train \
+  --overwrite
 ```
 
-Đầu ra chính:
+Tham so:
+
+- `--input-dir`: root frame shard, thuong la `crop_data`.
+- `--output-dir`: root clip shard, thuong la `clip_data`.
+- `--split`: neu bo trong, script tu tim `train/val/test`.
+- `--clip-len`: so frame moi clip, mac dinh `8`.
+- `--frame-stride`: buoc frame trong clip, mac dinh `1`.
+- `--clip-stride`: sliding-window stride, mac dinh `4`.
+- `--shard-maxcount`: so clip toi da moi shard.
+- `--shard-maxsize`: kich thuoc toi da moi shard.
+- `--overwrite`: xoa output split va build lai.
+
+Dau ra:
+
 - `clip_data/<split>/shard-*.tar`
 
-Hành vi quan trọng:
+Moi sample clip gom:
 
-- việc group clip và đặt key dùng `video_id` canonical của frame shard
-- rerun sẽ fail sớm nếu split shard đã tồn tại, trừ khi có `--overwrite`
+- `json`
+- `rgb.npy`
+- `diff.npy`
+- `cls` neu co label
 
-## Mẫu Chạy Khuyến Nghị
+`diff.npy` la absolute frame difference giua cac frame lien tiep, vi vay co `clip_len - 1` timestep.
 
-Khi preprocessing toàn bộ dữ liệu, hãy chạy theo từng split sau khi `videos_master.csv` đã tồn tại:
-
-1. `frame_extractor.py --split train`
-2. `face_detection.py --split train`
-3. `build_clips.py --split train`
-4. Lặp lại cho `val`
-5. Lặp lại cho `test`
-
-Điều này giữ output tách bạch và giúp vận hành job song song đơn giản hơn.
-
-## Bàn Giao Sang Huấn Luyện
-
-Khi `clip_data/train/` và `clip_data/val/` đã tồn tại, stage training có thể tiêu thụ trực tiếp:
+## Mau Chay Day Du
 
 ```bash
-python -m training.train --train-shards "clip_data/train/shard-*.tar" --val-shards "clip_data/val/shard-*.tar"
+python -m preprocessing.metadata_level --dataset-dir FaceForensics++_C23 --output-dir artifacts --output-name videos_master
+python -m preprocessing.analyze_videos_master --manifest artifacts/videos_master.csv
+
+python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train
+python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split train
+python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split train
+
+python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split val
+python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split val
+python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split val
+
+python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split test
+python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split test
+python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split test
 ```
 
-Xem [Quy Trình Huấn Luyện](training-workflow.md) để biết chi tiết về mô hình, checkpoint, và runtime.
+Dem clip:
+
+```bash
+python -m preprocessing.count_clips --clip-root clip_data --splits train val test
+```
+
+Sau khi co `clip_data/train` va `clip_data/val`, co the huan luyen:
+
+```bash
+python -m training.train \
+  --train-shards "clip_data/train/shard-*.tar" \
+  --val-shards "clip_data/val/shard-*.tar"
+```

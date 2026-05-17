@@ -1,110 +1,148 @@
-# Pipeline Dữ Liệu Deepfake Và Huấn Luyện
+# Pipeline Du Lieu Deepfake Va Huan Luyen
 
-Kho mã này biến đổi video kiểu FaceForensics++ thành các WebDataset shard sẵn sàng cho huấn luyện, sau đó huấn luyện mô hình phát hiện deepfake spatio-temporal trên các clip đã tạo ra.
+Kho ma nay bien doi video FaceForensics++ C23 thanh WebDataset shard va huan luyen mo hinh phat hien deepfake spatio-temporal tren clip da tien xu ly.
 
-Codebase hiện tại có hai lớp chính:
+Codebase gom hai phan chinh:
 
-1. `preprocessing/`
-   Tạo manifest, trích xuất frame, căn chỉnh khuôn mặt, và ghi frame shard cùng clip shard.
-2. `dataloader/` + `training/`
-   Đọc clip shard, chuẩn bị input cho mô hình, và huấn luyện detector kết hợp đặc trưng không gian từ RGB với đặc trưng thời gian từ frame difference.
+1. `preprocessing/`: tao manifest, trich xuat frame, can chinh khuon mat, tao frame shard va clip shard.
+2. `dataloader/` + `training/`: doc clip shard, chuan hoa batch, huan luyen, danh gia va xuat checkpoint/metric.
 
-## Cấu Trúc Kho Mã
+## Cau Truc
 
 ```text
-configs/         Cấu hình runtime và logging
-preprocessing/   Các bước tiền xử lý và CLI entrypoint
-dataloader/      Bộ đọc WebDataset cho clip
-training/        Mô hình, vòng lặp train, checkpointing, và utility
-tests/           Unit test và integration test cho preprocessing và training
-docs/            Tài liệu kiến trúc, pipeline, data contract, và hướng dẫn training
-artifacts/       Manifest sinh ra và output thử nghiệm
-frame_data/      Frame đã trích xuất và metadata frame
-crop_data/       Frame shard đã căn chỉnh khuôn mặt
-clip_data/       Clip shard dùng cho huấn luyện
+configs/         Cau hinh runtime, duong dan mac dinh va logging
+preprocessing/   CLI tien xu ly du lieu
+dataloader/      WebDataset loader cho clip-level shard
+training/        Mo hinh, train/test entrypoint va utility
+tests/           Unit test cho preprocessing, dataloader va training
+docs/            Tai lieu kien truc, pipeline, data contract va workflow
+artifacts/       Manifest, experiment output va test output
+frame_data/      Frame da trich xuat
+crop_data/       Frame shard da can chinh khuon mat
+clip_data/       Clip shard dung cho train/val/test
+figures/         Bieu do training neu render thanh cong
 ```
 
-## Cài Đặt
+## Cai Dat
 
-Dự án yêu cầu Python `>=3.12`.
-
-Cài dependency ở chế độ editable:
+Du an yeu cau Python `>=3.12`.
 
 ```bash
 pip install -e .
 ```
 
-## Quy Trình Tiền Xử Lý
-
-Thứ tự tiền xử lý khuyến nghị:
-
-1. Tạo `videos_master.csv`
-2. Trích xuất frame
-3. Phát hiện và căn chỉnh khuôn mặt thành frame shard
-4. Tạo clip shard có độ dài cố định
-
-### 1. Tạo Metadata Cấp Video
+Neu dung `uv`:
 
 ```bash
-python -m preprocessing.metadata_level --dataset-dir FaceForensics++_C23 --output-dir artifacts --output-name videos_master
+uv sync
 ```
 
-Đầu ra:
+## Quy Uoc Label
+
+Can chu y: `preprocessing.metadata_level` hien gan:
+
+- `original = 1`
+- cac manipulation nhu `Deepfakes`, `Face2Face`, `FaceShifter`, `FaceSwap`, `NeuralTextures` = `0`
+
+`frame_extractor`, `face_detection`, `build_clips`, dataloader va training se truyen tiep `binary_label` nay. Neu can train/evaluate theo quy uoc nguoc lai, dung `--invert-binary-labels` trong `training.train`, `training.test` hoac `training.test_with_best_threshold`.
+
+Luu y: truong text `label` o mot so stage sau van co the theo convention cu `0=real/1=fake`; khi can tinh toan hoac bao cao chinh xac, uu tien `binary_label`.
+
+## Pipeline Tien Xu Ly
+
+Thu tu khuyen nghi:
+
+1. Tao manifest cap video.
+2. Trich xuat frame.
+3. Phat hien va can chinh khuon mat thanh frame shard.
+4. Tao clip shard co do dai co dinh.
+
+### 1. Tao `videos_master.csv`
+
+```bash
+python -m preprocessing.metadata_level \
+  --dataset-dir FaceForensics++_C23 \
+  --output-dir artifacts \
+  --output-name videos_master
+```
+
+Dau ra:
 
 - `artifacts/videos_master.csv`
+- `artifacts/videos_master.parquet` neu moi truong ho tro parquet
 
-### 2. Trích Xuất Frame
+Kiem tra phan bo split:
 
 ```bash
-python -m preprocessing.frame_extractor --manifest artifacts/videos_master.csv --split train
+python -m preprocessing.analyze_videos_master --manifest artifacts/videos_master.csv
 ```
 
-Chế độ resume được bật mặc định. Dùng `--no-resume` nếu muốn chạy lại sạch.
+### 2. Trich Xuat Frame
 
-Đầu ra:
+```bash
+python -m preprocessing.frame_extractor \
+  --manifest artifacts/videos_master.csv \
+  --split train
+```
 
-- `frame_data/<category>/<video_name>/*.jpg`
+Resume duoc bat mac dinh thong qua audit CSV va frame da ton tai. Dung `--no-resume` de tao lai metadata/audit sach. Dung `--rebuild-csv-only` de tao lai metadata CSV tu frame da co.
+
+Dau ra:
+
+- `frame_data/<category>/<video_name>_frame_*.jpg`
 - `frame_data/frame_extraction_metadata.csv`
 - `frame_data/frame_extraction_audit.csv`
 
-### 3. Tạo Frame Shard Đã Căn Chỉnh Khuôn Mặt
+### 3. Tao Frame Shard Da Can Chinh Khuon Mat
 
 ```bash
-python -m preprocessing.face_detection --metadata-csv frame_data/frame_extraction_metadata.csv --frame-root frame_data --output-dir crop_data --split train
+python -m preprocessing.face_detection \
+  --metadata-csv frame_data/frame_extraction_metadata.csv \
+  --frame-root frame_data \
+  --output-dir crop_data \
+  --split train
 ```
 
-Đầu ra:
+Stage nay dung RetinaFace, detect tren keyframe, noi suy bbox/landmark giua keyframe khi co the, can chinh 5 landmark, crop tren align canvas va resize ve output cuoi.
+
+Dau ra:
 
 - `crop_data/<split>/shard-*.tar`
 - `audit/<split>/face_detection_audit.csv`
 
-### 4. Tạo Clip Shard
+### 4. Tao Clip Shard
 
 ```bash
-python -m preprocessing.build_clips --input-dir crop_data --output-dir clip_data --split train
+python -m preprocessing.build_clips \
+  --input-dir crop_data \
+  --output-dir clip_data \
+  --split train
 ```
 
-Đầu ra:
+Mac dinh moi clip co `clip_len=8`, `frame_stride=1`, `clip_stride=4`. Neu output split da ton tai, dung `--overwrite` de rebuild.
+
+Dau ra:
 
 - `clip_data/<split>/shard-*.tar`
 
-Lặp lại các bước frame, face, và clip cho `val` và `test` khi chuẩn bị toàn bộ dataset.
-
-## Quy Trình Huấn Luyện
-
-Huấn luyện sử dụng clip shard và xây dựng detector gồm:
-
-- nhánh không gian dựa trên `ResNet50`, có spatial attention và texture enhancement mặc định
-- CNN thời gian trên `diff.npy`, hỗ trợ mean pooling hoặc attention pooling
-- fusion head cho bài toán phân loại nhị phân
-
-Lệnh train ví dụ:
+Dem so clip:
 
 ```bash
-python -m training.train --train-shards "clip_data/train/shard-*.tar" --val-shards "clip_data/val/shard-*.tar" --output-dir artifacts/experiments/st_detector
+python -m preprocessing.count_clips --clip-root clip_data --splits train val test
 ```
 
-Ví dụ bật augmentation, attention pooling, và focal loss:
+Lap lai cac buoc frame, face va clip cho `val` va `test`.
+
+## Huan Luyen
+
+```bash
+python -m training.train \
+  --train-shards "clip_data/train/shard-*.tar" \
+  --val-shards "clip_data/val/shard-*.tar" \
+  --output-dir artifacts/experiments/st_detector
+```
+
+Vi du bat augmentation, focal loss va temporal attention:
 
 ```bash
 python -m training.train \
@@ -115,62 +153,57 @@ python -m training.train \
   --loss-type focal
 ```
 
-Hành vi runtime quan trọng:
+Mo hinh gom:
 
-- nhánh thời gian kỳ vọng `clip_len - 1` frame thời gian từ `diff.npy`
-- nhánh không gian có thể bị đóng băng trong warmup thông qua `--spatial-freeze-warmup-epochs`
-- độ lệch lớp có thể được ước tính từ training shard và chuyển thành `pos_weight`
-- augmentation nếu bật được áp dụng nhất quán trên toàn bộ clip và có thể recompute `diff.npy`
-- loss mặc định là `BCEWithLogitsLoss`; có thể đổi sang focal loss qua `--loss-type focal`
-- việc chọn checkpoint ưu tiên validation AUC, và fallback sang negative validation loss khi AUC không xác định
-- early stopping dựa trên metric chọn checkpoint
+- spatial branch: `ResNet50` ImageNet, mac dinh co texture enhancement va spatial attention
+- temporal branch: CNN tren `diff.npy`, ho tro `mean`, `attention`, `gru`; CLI mac dinh la `gru`
+- fusion head: MLP tren feature khong gian va thoi gian, xuat mot binary logit
 
-Đầu ra huấn luyện:
+Dau ra training:
 
 - `artifacts/experiments/st_detector/history.json`
 - `artifacts/experiments/st_detector/best.pt`
 - `artifacts/experiments/st_detector/checkpoint_epoch_*.pt`
-- `figures/<run>/latest/` và `figures/<run>/best/` khi render figure thành công
+- `figures/<run>/latest/` va `figures/<run>/best/epoch_*/` neu render figure thanh cong
 
-## Tổng Quan Đầu Ra
+## Danh Gia
 
-- `artifacts/videos_master.csv`
-  Manifest cấp video với split được gán một cách xác định.
-- `frame_data/frame_extraction_metadata.csv`
-  Manifest cấp frame do `frame_extractor.py` sinh ra.
-- `frame_data/frame_extraction_audit.csv`
-  Tệp audit phục vụ resume cho các video đã xử lý trong `frame_extractor.py`.
-- `crop_data/<split>/shard-*.tar`
-  WebDataset shard cấp frame chứa ảnh khuôn mặt đã căn chỉnh.
-- `clip_data/<split>/shard-*.tar`
-  WebDataset shard cấp clip chứa `rgb.npy`, `diff.npy`, và metadata.
-- `artifacts/experiments/st_detector/`
-  Lịch sử train và checkpoint.
+Danh gia voi threshold thu cong:
 
-## Kiểm Thử
+```bash
+python -m training.test \
+  --test-shards "clip_data/test/shard-*.tar" \
+  --checkpoint artifacts/experiments/st_detector/best.pt \
+  --output-dir artifacts/test_results
+```
 
-Chạy toàn bộ test suite:
+Danh gia va tu tim threshold tot nhat:
+
+```bash
+python -m training.test_with_best_threshold \
+  --test-shards "clip_data/test/shard-*.tar" \
+  --checkpoint artifacts/experiments/st_detector/best.pt \
+  --prediction-threshold-mode f1
+```
+
+Dau ra:
+
+- `artifacts/test_results/test_metrics.json`
+- `artifacts/test_results/test_predictions.csv`
+
+## Kiem Thu
 
 ```bash
 python -m unittest discover -s tests
-```
-
-Chạy nhóm test preprocessing:
-
-```bash
-python -m unittest tests.test_face_detection tests.test_face_detection_split tests.test_face_detection_crop
-```
-
-Chạy compile check:
-
-```bash
 python -m compileall preprocessing training dataloader tests
 ```
 
-## Tài Liệu
+## Tai Lieu
 
-- [Kiến Trúc](docs/architecture.md)
-- [Pipeline Tiền Xử Lý](docs/preprocessing-pipeline.md)
-- [Quy Trình Huấn Luyện](docs/training-workflow.md)
+- [Tong Hop Tai Lieu](docs/summary_documentation.md)
+- [Kien Truc](docs/architecture.md)
+- [Pipeline Tien Xu Ly](docs/preprocessing-pipeline.md)
+- [Quy Trinh Huan Luyen Va Danh Gia](docs/training-workflow.md)
 - [Data Contract](docs/data-contracts.md)
-- [Đóng Góp](CONTRIBUTING.md)
+- [Thay Doi Tai Lieu](docs/documentation-changes.md)
+- [Dong Gop](CONTRIBUTING.md)

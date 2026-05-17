@@ -1,164 +1,100 @@
-# So Sánh Tài Liệu Cũ Và Tài Liệu Mới
+# Thay Doi Tai Lieu
 
-## Mục Đích
+## Muc Dich
 
-Tài liệu này ghi lại những điểm khác nhau giữa phiên bản tài liệu trước đó và phiên bản vừa được cập nhật cho pipeline training deepfake detector.
-
-Phạm vi so sánh gồm:
+File nay ghi lai nhung diem da duoc dong bo trong lan cap nhat tai lieu hien tai. Pham vi gom:
 
 - [README.md](../README.md)
-- [training-workflow.md](training-workflow.md)
+- [summary_documentation.md](summary_documentation.md)
 - [architecture.md](architecture.md)
+- [preprocessing-pipeline.md](preprocessing-pipeline.md)
+- [training-workflow.md](training-workflow.md)
 - [data-contracts.md](data-contracts.md)
 
-## Tổng Quan Thay Đổi
+## Diem Cap Nhat Chinh
 
-Phiên bản cũ đã mô tả đúng luồng chính của dự án: preprocessing, dataloader, training, checkpoint, và data contract. Tuy nhiên phần training/model còn ở mức tổng quan, chưa phản ánh đầy đủ các tùy chọn hiện có trong code.
+Tai lieu da duoc cap nhat de khop voi code hien tai thay vi mo ta pipeline cu o muc tong quan.
 
-Phiên bản mới bổ sung chi tiết về:
+Nhung thay doi quan trong:
 
-- spatial attention
-- texture enhancement
-- temporal attention pooling
-- augmentation trong training
-- focal loss
-- early stopping
-- learning rate riêng theo từng nhánh
-- output figure
-- các trường mới trong `history.json`
+- Bo sung `docs/summary_documentation.md`, vi IDE dang mo file nay nhung repo chua co file Markdown tuong ung.
+- Lam ro quy uoc label hien tai: `original=1`, manipulation `=0`.
+- Them canh bao dung `--invert-binary-labels` neu can dao quy uoc label khi train/test.
+- Cap nhat temporal branch: `--temporal-pool` ho tro `mean`, `attention`, `gru`; CLI train mac dinh `gru`.
+- Bo sung augmentation moi: JPEG compression va Gaussian blur.
+- Bo sung workflow danh gia bang `training.test` va `training.test_with_best_threshold`.
+- Bo sung output `test_metrics.json` va `test_predictions.csv`.
+- Cap nhat data contract cho frame audit, clip shard, batch, history, checkpoint va test output.
+- Cap nhat preprocessing docs theo CLI hien tai cua `frame_extractor`, `face_detection`, `build_clips`, `analyze_videos_master`, `count_clips`.
 
-## So Sánh Theo File
+## Theo File
 
 ### `README.md`
 
-Trước khi cập nhật:
+Da viet lai thanh quickstart end-to-end:
 
-- mô tả detector gồm `ResNet50`, CNN thời gian trên `diff.npy`, và fusion head
-- có một lệnh train cơ bản
-- liệt kê output training gồm `history.json`, `best.pt`, và checkpoint theo epoch
+- cau truc repo
+- cai dat
+- label convention
+- tien xu ly 4 buoc
+- huan luyen
+- danh gia
+- test
+- lien ket tai lieu
 
-Sau khi cập nhật:
+### `summary_documentation.md`
 
-- nói rõ nhánh không gian có spatial attention và texture enhancement mặc định
-- nói rõ nhánh thời gian hỗ trợ mean pooling hoặc attention pooling
-- thêm ví dụ train với `--use-augmentation`, `--temporal-pool attention`, và `--loss-type focal`
-- bổ sung ghi chú về augmentation nhất quán trên toàn clip
-- bổ sung focal loss và early stopping vào hành vi runtime
-- bổ sung output figure trong `figures/<run>/latest/` và `figures/<run>/best/`
+File moi, dung lam muc luc va ban tom tat:
 
-Ý nghĩa:
+- pipeline tong the
+- lenh chay chinh
+- output moi stage
+- cac rui ro/can chu y khi van hanh
 
-- README giờ phản ánh tốt hơn các khả năng train thực tế.
-- Người dùng mới có thể thấy ngay các tùy chọn nâng cao mà không cần đọc code.
+### `architecture.md`
 
-### `docs/training-workflow.md`
+Da cap nhat:
 
-Trước khi cập nhật:
+- luong xu ly tu video den test report
+- vai tro tung module
+- thiet ke face detection hien tai
+- temporal branch GRU
+- checkpoint selection, early stopping va threshold evaluation
 
-- liệt kê các argument train cơ bản như shard, epoch, batch size, device, AMP, pos weight, và warmup
-- mô tả detector ở mức ba thành phần: spatial branch, temporal branch, fusion head
-- mô tả optimizer, loss, scheduler, gradient clipping, AMP, checkpoint selection, và warmup
+### `preprocessing-pipeline.md`
 
-Sau khi cập nhật:
+Da cap nhat:
 
-- bổ sung CLI argument cho model option:
-  - `--model-dropout`
-  - `--temporal-pool {mean,attention}`
-  - `--disable-spatial-attention`
-  - `--disable-texture-enhancement`
-- bổ sung CLI argument cho training behavior:
-  - `--early-stopping-patience`
-  - `--use-augmentation`
-  - `--disable-augment-recompute-diff`
-  - `--hflip-prob`
-  - `--brightness`
-  - `--contrast`
-  - `--loss-type {bce,focal}`
-  - `--focal-alpha`
-  - `--focal-gamma`
-- bổ sung mô tả chi tiết từng nhánh model
-- bổ sung learning rate riêng cho spatial, temporal, và fusion branch
-- bổ sung phần augmentation
-- bổ sung output figure
-- mô tả `history.json` có thêm learning rate, phase, tùy chọn model, và selection metric
+- CLI argument thuc te cua cac stage preprocessing
+- resume behavior cua frame extractor va face detection
+- output theo split
+- contract cua clip builder
+- lenh mau day du cho train/val/test
 
-Ý nghĩa:
+### `training-workflow.md`
 
-- File này chuyển từ hướng dẫn training tổng quan thành tài liệu workflow sát với CLI hiện tại.
-- Các tham số quan trọng trong `training/train.py` và `training/utils/builders.py` được đưa vào tài liệu.
+Da cap nhat:
 
-### `docs/architecture.md`
+- tat ca nhom argument training quan trong
+- augmentation JPEG/blur
+- label inversion
+- temporal pooling `gru`
+- checkpoint/history/figure output
+- danh gia test va best-threshold workflow
 
-Trước khi cập nhật:
+### `data-contracts.md`
 
-- mô tả kiến trúc training là detector hai nhánh
-- nhánh không gian dùng `ResNet50`
-- nhánh thời gian dùng CNN nhẹ trên frame difference
-- fusion head nối đặc trưng rồi phân loại
-- phần checkpointing mô tả metric và state được lưu
+Da cap nhat:
 
-Sau khi cập nhật:
+- manifest video
+- frame metadata va audit
+- face frame shard
+- clip shard
+- dataloader batch
+- `history.json`
+- checkpoint `.pt`
+- test output
 
-- làm rõ temporal branch là CNN residual nhẹ
-- thêm chi tiết về `SpatialResNet50`:
-  - output 2048 chiều
-  - texture enhancement từ feature nông `layer1`
-  - fuse feature bằng `1x1 conv`
-  - spatial attention trước global average pooling
-- thêm chi tiết về `TemporalDiffCNN`:
-  - encode từng frame-difference độc lập
-  - project về 256 chiều trong cấu hình train mặc định
-  - pool theo mean hoặc attention
-- thêm chi tiết về `FusionHead`
-- ghi rõ `return_features=True` trả thêm tensor debug/visualization
-- bổ sung behavior của training loop:
-  - freeze warmup
-  - `ReduceLROnPlateau`
-  - early stopping
-  - render figure summary
+## Ghi Chu Con Lai
 
-Ý nghĩa:
-
-- Tài liệu kiến trúc giờ khớp hơn với implementation trong `spatial_resnet50.py`, `temporal_diff_cnn.py`, `fusion_head.py`, và `spatio_temporal_detector.py`.
-- Người đọc có thể hiểu model đang làm gì mà không phải mở từng file Python.
-
-### `docs/data-contracts.md`
-
-Trước khi cập nhật:
-
-- mô tả `history.json` có `run`, `train`, và `val`
-- `run` gồm `class_balance`, `use_pos_weight`, và `auto_pos_weight`
-- validation có `selection_metric`, `selection_metric_name`, và `learning_rates`
-
-Sau khi cập nhật:
-
-- bổ sung các trường trong `run`:
-  - `model_dropout`
-  - `temporal_pool`
-  - `use_spatial_attention`
-  - `use_texture_enhancement`
-- bổ sung trường validation:
-  - `phase`
-
-Ý nghĩa:
-
-- Data contract giờ phản ánh đúng metadata training được ghi trong `history.json`.
-- Việc phân biệt phase như `temporal_warmup` và `full_finetune` được tài liệu hóa.
-
-## Bảng Tóm Tắt Khác Biệt
-
-| Hạng mục | Docs cũ | Docs mới |
-| --- | --- | --- |
-| Spatial branch | Chỉ nói dùng `ResNet50` | Bổ sung spatial attention, texture enhancement, output 2048 chiều |
-| Temporal branch | CNN trên `diff.npy` | Bổ sung CNN residual, feature 256 chiều, mean/attention pooling |
-| Fusion head | Nối đặc trưng rồi phân loại | Bổ sung MLP với dropout và binary logit |
-| CLI training | Chủ yếu argument cơ bản | Bổ sung model option, augmentation, focal loss, early stopping |
-| Augmentation | Chưa mô tả | Mô tả clip-consistent augmentation và recompute diff |
-| Loss | `BCEWithLogitsLoss` | Thêm focal loss |
-| Checkpoint selection | AUC hoặc negative loss | Giữ nguyên, bổ sung liên hệ với scheduler và early stopping |
-| Output | History và checkpoint | Thêm figure output |
-| `history.json` | Trường cơ bản | Thêm model option và phase |
-
-## Kết Luận
-
-Tài liệu cũ phù hợp với pipeline cơ bản, nhưng thiếu nhiều chi tiết đã có trong code training hiện tại. Tài liệu mới không thay đổi thiết kế hệ thống, mà cập nhật mô tả để khớp với implementation hiện có và giúp người dùng cấu hình training chính xác hơn.
+Co mot diem code can luu y: `metadata_level.py` gan `original=1`, nhung mot so fallback/helper va truong text `label` trong pipeline van dung convention `real=0/fake=1`. Tai lieu hien tai xem `binary_label` trong manifest/shard la nguon su that va khuyen nghi dung `--invert-binary-labels` khi can dao quy uoc.

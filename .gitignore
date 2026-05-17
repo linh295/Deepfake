@@ -61,3 +61,5 @@ models/
 FaceForensics++_C23/
 FaceForensics++_C40/
 .tmp-tests/
+artifacts3/
+figures3/

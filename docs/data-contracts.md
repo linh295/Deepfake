@@ -1,11 +1,14 @@
 # Data Contract
 
+Tai lieu nay mo ta cac file trung gian va output ma pipeline dang san sinh.
+
 ## 1. `videos_master.csv`
 
-Được sinh bởi:
+Sinh boi:
+
 - [metadata_level.py](../preprocessing/metadata_level.py)
 
-Cột quan trọng:
+Cot:
 
 - `video_id`
 - `video_path`
@@ -16,18 +19,21 @@ Cột quan trọng:
 - `original_fps`
 - `num_frames`
 
-Ghi chú:
+Ghi chu:
 
-- `split` được gán ở cấp video và nên được xem là nguồn sự thật cho việc định tuyến split ở các stage sau.
-- việc gán split nhằm mục tiêu tỷ lệ `8:1:1` trong từng category, trong giới hạn của ràng buộc nhóm nguyên.
-- `binary_label` dùng `0` cho real và `1` cho fake.
+- `video_path` la duong dan tuong doi so voi dataset root.
+- `split` la nguon su that cho dinh tuyen `train/val/test`.
+- Split duoc gan xap xi `80/10/10` trong tung category bang grouping on dinh.
+- Quy uoc label hien tai: `original=1`, manipulation `=0`.
+- Neu can quy uoc nguoc lai o training/evaluation, dung `--invert-binary-labels`.
 
 ## 2. `frame_extraction_metadata.csv`
 
-Được sinh bởi:
+Sinh boi:
+
 - [frame_extractor.py](../preprocessing/frame_extractor.py)
 
-Cột quan trọng:
+Cot:
 
 - `frame_path`
 - `video_id`
@@ -48,23 +54,51 @@ Cột quan trọng:
 - `total_video_frames`
 - `extraction_date`
 
-Ghi chú:
+Ghi chu:
 
-- `frame_path` là đường dẫn tương đối so với thư mục frame root.
-- `split` phải được giữ lại vì các stage sau có thể lọc theo trường này.
+- `frame_path` tuong doi so voi `frame_data`.
+- `frame_number` la index cua frame sau khi sample theo target FPS.
+- `original_frame_index` la index frame trong video goc.
+- `timestamp` tinh theo video FPS goc.
+- `split` va `binary_label` duoc truyen tu `videos_master.csv`.
 
-## 3. Face Frame Shard
+## 3. `frame_extraction_audit.csv`
 
-Được sinh bởi:
+Sinh boi:
+
+- [frame_extractor.py](../preprocessing/frame_extractor.py)
+
+Cot:
+
+- `category`
+- `video_id`
+- `split`
+- `status`
+- `updated_at`
+
+Ghi chu:
+
+- Audit dung de resume theo video.
+- Key logic la `category|video_id|split`.
+
+## 4. Face Frame Shard
+
+Sinh boi:
+
 - [face_detection.py](../preprocessing/face_detection.py)
 
-Thành phần thường có trong mỗi sample shard:
+Duong dan:
+
+- `crop_data/<split>/shard-*.tar` khi co `--split`
+- `crop_data/shard-*.tar` khi khong tach split
+
+Thanh phan sample:
 
 - `json`
-- `jpg` hoặc `png`
-- `cls` khi nhãn đã biết
+- `jpg` hoac `png`
+- `cls` neu label hop le
 
-Trường metadata quan trọng trong `json`:
+Truong metadata quan trong trong `json`:
 
 - `key`
 - `video_id`
@@ -77,6 +111,10 @@ Trường metadata quan trọng trong `json`:
 - `frame_number`
 - `original_frame_index`
 - `timestamp`
+- `video_fps`
+- `extraction_fps`
+- `width`
+- `height`
 - `face_detected`
 - `num_faces`
 - `face_confidence`
@@ -98,26 +136,32 @@ Trường metadata quan trọng trong `json`:
 - `image_format`
 - `detect_every_k`
 
-Ghi chú:
+Ghi chu:
 
-- `bbox_*` là bounding box detect được trong hệ tọa độ của ảnh gốc.
-- `crop_*` là cửa sổ crop trong hệ tọa độ của align-canvas.
-- `aligned_width` và `aligned_height` là kích thước output cuối sau resize.
-- `align_canvas_*` mô tả canvas lớn hơn được dùng trước khi crop cuối cùng bị resize.
+- `bbox_*` nam trong toa do anh goc.
+- `crop_*` nam trong toa do align canvas.
+- `aligned_width/height` la kich thuoc output sau resize.
+- `bbox_source` co the la direct/keyframe/interpolated tuy detection path.
+- Audit face detection ghi metadata cua sample da ghi thanh cong.
 
-## 4. Clip Shard
+## 5. Clip Shard
 
-Được sinh bởi:
+Sinh boi:
+
 - [build_clips.py](../preprocessing/build_clips.py)
 
-Thành phần thường có trong mỗi sample shard:
+Duong dan:
+
+- `clip_data/<split>/shard-*.tar`
+
+Thanh phan sample:
 
 - `json`
 - `rgb.npy`
 - `diff.npy`
-- `cls` khi nhãn đã biết
+- `cls` neu label hop le
 
-Trường metadata quan trọng trong `json`:
+Truong metadata trong `json`:
 
 - `key`
 - `split`
@@ -136,6 +180,7 @@ Trường metadata quan trọng trong `json`:
 - `source_keys`
 - `center_candidate_indices`
 - `default_center_index`
+- `spatial_sampling_note`
 - `extraction_fps`
 - `video_fps`
 - `height`
@@ -143,19 +188,25 @@ Trường metadata quan trọng trong `json`:
 - `rgb_dtype`
 - `diff_dtype`
 
-Ghi chú:
+Array:
 
-- `rgb.npy` có shape `(T, C, H, W)`.
-- `diff.npy` lưu frame difference giữa các frame liên tiếp.
-- `source_keys` có thể được dùng để truy vết clip về sample cấp frame.
-- `key` của clip được suy ra từ `video_id` canonical của frame shard, không phải `video_name`.
+- `rgb.npy`: shape `(T, C, H, W)`, dtype `uint8`.
+- `diff.npy`: shape `(T-1, C, H, W)`, dtype `uint8`.
 
-## 5. Hợp Đồng Dữ Liệu Của Batch Từ Dataloader
+Ghi chu:
 
-Được sinh bởi:
+- `diff.npy` la absolute difference giua frame lien tiep.
+- `key` duoc tao tu canonical `video_id` va `clip_id`.
+- `center_candidate_indices` mac dinh `[2, 3, 4, 5]` khi `clip_len=8`.
+- Truong text `label` trong clip duoc suy theo convention cu `0=real/1=fake`; voi manifest hien tai no co the khong khop semantic category. Doc `binary_label` la nguon su that va dung `--invert-binary-labels` neu can dao quy uoc.
+
+## 6. Dataloader Batch
+
+Sinh boi:
+
 - [dataloader/dataset.py](../dataloader/dataset.py)
 
-Key trong batch:
+Key:
 
 - `spatial`
 - `temporal`
@@ -163,36 +214,42 @@ Key trong batch:
 - `spatial_index`
 - `meta`
 
-Tensor shape kỳ vọng:
+Shape:
 
 - `spatial`: `(B, 3, H, W)`
 - `temporal`: `(B, T-1, 3, H, W)`
 - `label`: `(B,)`
 - `spatial_index`: `(B,)`
 
-Ghi chú:
+Normalize:
 
-- `spatial` là một frame RGB được chọn từ `rgb.npy`.
-- `temporal` đến từ `diff.npy`, vì vậy chiều thời gian của nó phải bằng `clip_length - 1`.
-- `spatial` được normalize theo ImageNet mean/std.
-- `temporal` được scale về `[0, 1]` mà không dùng ImageNet normalization.
-- `meta` giữ lại JSON metadata của từng sample để debug và truy vết.
+- `spatial`: RGB scale `[0, 1]`, sau do ImageNet mean/std.
+- `temporal`: frame difference scale `[0, 1]`.
 
-## 6. Hợp Đồng Dữ Liệu Của Đầu Ra Huấn Luyện
+Selection:
 
-Được sinh bởi:
+- Train: random trong `center_candidate_indices` neu co.
+- Val/test: `default_center_index` neu hop le, fallback ve center candidate.
+
+Augmentation:
+
+- Chi ap dung khi `training=True` va `use_augmentation=True`.
+- Hflip/brightness/contrast/blur/JPEG dung cung param cho toan clip.
+- Neu `augment_recompute_diff=True`, `temporal` duoc tinh lai tu RGB sau augmentation.
+
+## 7. `history.json`
+
+Sinh boi:
+
 - [training/train.py](../training/train.py)
-- [training/utils/checkpointing.py](../training/utils/checkpointing.py)
 
-### `history.json`
-
-Key cấp cao nhất:
+Key cap cao:
 
 - `run`
 - `train`
 - `val`
 
-Các trường thường có trong `run`:
+`run` gom:
 
 - `class_balance`
 - `use_pos_weight`
@@ -202,7 +259,7 @@ Các trường thường có trong `run`:
 - `use_spatial_attention`
 - `use_texture_enhancement`
 
-Các trường thường có trong từng dòng `train` và `val`:
+Moi row trong `train` thuong gom:
 
 - `epoch`
 - `loss`
@@ -210,16 +267,25 @@ Các trường thường có trong từng dòng `train` và `val`:
 - `f1`
 - `auc`
 
-Trường bổ sung cho validation:
+Moi row trong `val` gom cac metric tren va:
 
 - `selection_metric`
 - `selection_metric_name`
 - `learning_rates`
 - `phase`
 
-### Checkpoint `.pt`
+`phase`:
 
-Key cấp cao nhất:
+- `temporal_warmup` khi spatial branch dang freeze.
+- `full_finetune` sau warmup.
+
+## 8. Checkpoint `.pt`
+
+Sinh boi:
+
+- [training/utils/checkpointing.py](../training/utils/checkpointing.py)
+
+Key:
 
 - `epoch`
 - `model_state`
@@ -233,9 +299,53 @@ Key cấp cao nhất:
 - `class_balance`
 - `rng_state`
 
-Ghi chú:
+Ghi chu:
 
-- `train_config` lưu `TrainConfig` sau khi được serialize.
-- `model_config` lưu `ModelConfig` sau khi được serialize.
-- `class_balance` là trường tùy chọn và chỉ có khi metadata class-balance được tính toán.
-- `rng_state` được lưu để phục vụ khả năng tái lập và resume.
+- `model_config` duoc `training.test` va `training.test_with_best_threshold` dung de rebuild model.
+- Checkpoint nen duoc load bang helper `load_checkpoint` trong `training/utils/checkpointing.py`.
+
+## 9. Test Output
+
+Sinh boi:
+
+- [training/test.py](../training/test.py)
+- [training/test_with_best_threshold.py](../training/test_with_best_threshold.py)
+
+File:
+
+- `test_metrics.json`
+- `test_predictions.csv`
+
+`test_predictions.csv` cot:
+
+- `key`
+- `video_id`
+- `category`
+- `label_name`
+- `label`
+- `prob_positive`
+- `pred`
+- `spatial_index`
+
+`training.test` ghi `test_metrics.json` voi:
+
+- checkpoint metadata
+- threshold
+- AUC
+- accuracy
+- balanced accuracy
+- F1
+- precision
+- recall
+- confusion matrix
+- label distribution
+- prediction distribution
+- probability summary
+
+`training.test_with_best_threshold` bo sung:
+
+- `manual_threshold`
+- `best_thresholds`
+- `selected_threshold_mode`
+- `selected_threshold`
+- `selected_threshold_metrics`

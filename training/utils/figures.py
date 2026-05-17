@@ -104,8 +104,10 @@ def render_training_figures(
 
 def _class_name_by_label(invert_binary_labels: bool) -> dict[int, str]:
     if invert_binary_labels:
-        return {0: "fake", 1: "real"}
-    return {0: "real", 1: "fake"}
+        # After inversion: 0 becomes real, 1 becomes fake
+        return {0: "real", 1: "fake"}
+    # Before inversion (raw metadata): 0 is fake, 1 is real
+    return {0: "fake", 1: "real"}
 
 
 def _figure_summary_text(

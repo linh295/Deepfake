@@ -1,195 +1,201 @@
-# Kiến Trúc
+# Kien Truc
 
-## Mục Tiêu
+## Muc Tieu
 
-Kho mã này hỗ trợ một quy trình deepfake end-to-end:
+Du an cung cap pipeline end-to-end cho bai toan phat hien deepfake:
 
-1. biến đổi video gốc thành frame shard và clip shard có thể tái sử dụng
-2. huấn luyện detector spatio-temporal trên input WebDataset cấp clip
+1. Quet video FaceForensics++ C23 va tao manifest co split on dinh.
+2. Trich xuat frame o target FPS.
+3. Detect/can chinh khuon mat va ghi frame WebDataset shard.
+4. Gom frame thanh clip WebDataset shard.
+5. Huan luyen va danh gia detector spatio-temporal.
 
-## Luồng Xử Lý Tổng Quan
+## Luong Xu Ly
 
 ```text
-Video gốc
-  -> manifest metadata cấp video
-  -> frame đã trích xuất
-  -> frame shard đã căn chỉnh khuôn mặt
-  -> clip shard
-  -> batch từ dataloader
-  -> mô hình spatio-temporal
-  -> checkpoint + history
+Video goc
+  -> artifacts/videos_master.csv
+  -> frame_data/frame_extraction_metadata.csv + frame JPG
+  -> crop_data/<split>/shard-*.tar
+  -> clip_data/<split>/shard-*.tar
+  -> ClipWebDataset/DataLoader
+  -> SpatioTemporalDeepfakeDetector
+  -> history.json + checkpoint + test report
 ```
 
-## Các Thành Phần Chính
+## Thanh Phan Chinh
 
 ### `configs/`
 
-- [settings.py](../configs/settings.py)
-  Tập trung hóa đường dẫn mặc định và runtime setting.
-- [loggings.py](../configs/loggings.py)
-  Cấu hình logging dùng chung cho preprocessing và training.
+- [settings.py](../configs/settings.py): duong dan mac dinh, FPS, JPEG quality, RetinaFace cache va category mapping.
+- [loggings.py](../configs/loggings.py): logging dung chung.
 
-`frame_extractor.py` cũng có fallback sang `FaceForensics++_C23` khi thư mục raw-data được cấu hình không tồn tại, vì vậy CLI argument vẫn là nguồn sự thật an toàn nhất cho dataset path.
+`settings.RAW_DATA_DIR` mac dinh la `FaceForensics++_C23 2`; `frame_extractor` fallback sang `FaceForensics++_C23` neu duong dan nay khong ton tai. Khi chay that, nen truyen `--dataset-dir` hoac `--manifest` ro rang.
 
 ### `preprocessing/`
 
-- [metadata_level.py](../preprocessing/metadata_level.py)
-  Tạo `videos_master.csv` từ thư mục dataset và gán split một cách xác định.
-- [frame_extractor.py](../preprocessing/frame_extractor.py)
-  Trích xuất frame, giữ lại split metadata, và hỗ trợ resume.
-- [face_detection.py](../preprocessing/face_detection.py)
-  CLI entrypoint mỏng cho pipeline face detection.
-- [_face_detection_pipeline.py](../preprocessing/_face_detection_pipeline.py)
-  Chứa logic chính cho detect khuôn mặt, căn chỉnh, crop, nội suy, resume, và ghi shard.
-- [build_clips.py](../preprocessing/build_clips.py)
-  Tạo clip có độ dài cố định từ frame shard đã căn chỉnh.
+- [metadata_level.py](../preprocessing/metadata_level.py): tao manifest video, doc FPS/so frame, gan split.
+- [analyze_videos_master.py](../preprocessing/analyze_videos_master.py): in bao cao phan bo split theo category.
+- [frame_extractor.py](../preprocessing/frame_extractor.py): trich xuat frame, ghi metadata/audit va ho tro resume.
+- [face_detection.py](../preprocessing/face_detection.py): CLI wrapper cho face pipeline.
+- [_face_detection_pipeline.py](../preprocessing/_face_detection_pipeline.py): RetinaFace detection, keyframe interpolation, alignment, crop, shard writer va audit.
+- [build_clips.py](../preprocessing/build_clips.py): gom frame shard thanh clip shard.
+- [count_clips.py](../preprocessing/count_clips.py): dem so shard/clip trong `clip_data`.
 
 ### `dataloader/`
 
-- [dataset.py](../dataloader/dataset.py)
-  Đọc clip-level WebDataset shard, kiểm tra shape của sample, normalize input không gian và thời gian, và collate thành batch cho training.
+- [dataset.py](../dataloader/dataset.py): doc clip WebDataset shard, validate shape, chon spatial frame, normalize tensor, ap dung augmentation khi train va collate batch.
 
-Dataloader sinh ra:
+Batch output gom:
 
-- một frame RGB cho nhánh không gian
-- một chuỗi tensor frame-difference cho nhánh thời gian
-- một nhãn nhị phân
-- clip metadata để truy vết
+- `spatial`: mot frame RGB cho spatial branch
+- `temporal`: chuoi frame difference cho temporal branch
+- `label`: binary label sau tuy chon invert
+- `spatial_index`: index frame RGB duoc chon
+- `meta`: metadata JSON cua sample
 
 ### `training/`
 
-- [train.py](../training/train.py)
-  CLI chính cho việc huấn luyện detector spatio-temporal.
-- [spatio_temporal_detector.py](../training/spatio_temporal_detector.py)
-  Nối dây cấp cao nhất cho mô hình.
-- [spatial_resnet50.py](../training/spatial_resnet50.py)
-  Nhánh không gian dựa trên torchvision `ResNet50`.
-- [temporal_diff_cnn.py](../training/temporal_diff_cnn.py)
-  Nhánh thời gian trên chuỗi `diff.npy`.
-- [fusion_head.py](../training/fusion_head.py)
-  Ghép đặc trưng không gian và thời gian thành bộ phận phân loại nhị phân.
-- `training/utils/`
-  Gồm builder, vòng lặp train, metric, checkpointing, ước tính class-balance, freezing, progress estimation, và runtime helper.
+- [train.py](../training/train.py): entrypoint huan luyen.
+- [test.py](../training/test.py): evaluate voi threshold thu cong.
+- [test_with_best_threshold.py](../training/test_with_best_threshold.py): evaluate va tinh threshold theo Youden, F1 hoac balanced accuracy.
+- [spatio_temporal_detector.py](../training/spatio_temporal_detector.py): module detector cap cao.
+- [spatial_resnet50.py](../training/spatial_resnet50.py): spatial branch ResNet50.
+- [temporal_diff_cnn.py](../training/temporal_diff_cnn.py): temporal branch tren frame difference, ho tro `mean`, `attention`, `gru`.
+- [fusion_head.py](../training/fusion_head.py): MLP fusion classifier.
+- `training/utils/`: builder, train/val loop, metric, checkpoint, class balance, freezing, figure va runtime helper.
 
-## Biên Giới Dữ Liệu
+## Label Va Split
 
-### Manifest Cấp Video
+Manifest video la nguon su that cho split va label.
 
-Được sinh bởi `metadata_level.py`.
+Quy uoc label hien tai trong [metadata_level.py](../preprocessing/metadata_level.py):
 
-Mục đích:
+- `original = 1`
+- `Deepfakes`, `Face2Face`, `FaceShifter`, `FaceSwap`, `NeuralTextures` = `0`
 
-- liệt kê các video
-- ghi lại category và nhãn
-- gán `train/val/test`
-- cung cấp input ổn định cho bước trích xuất frame
+Mot so helper va truong text `label` van theo fallback cu `real=0/fake=1`. Voi manifest hien tai, truong text nay co the khong phan anh dung y nghia semantic cua category. Vi vay can xem `binary_label` trong `videos_master.csv` va shard la nguon su that. Training/test co `--invert-binary-labels` de dao label o dataloader khi can.
 
-### Manifest Cấp Frame
+Split duoc gan o cap video va duoc truyen qua:
 
-Được sinh bởi `frame_extractor.py`.
+- `frame_extraction_metadata.csv`
+- frame shard JSON
+- clip shard JSON
+- dataloader `meta`
 
-Mục đích:
+## Thiet Ke Preprocessing
 
-- ghi lại đường dẫn frame đã trích xuất
-- giữ lại frame index gốc và timestamp
-- chuyển tiếp thông tin split xuống các stage sau
+### Metadata Video
 
-### Frame Shard
+`metadata_level.py` quet cac category hop le, doc thong tin video bang OpenCV, tao `video_id`, `video_path`, `category`, `binary_label`, `compression`, `split`, `original_fps`, `num_frames`.
 
-Được sinh bởi `face_detection.py`.
+Split duoc gan xap xi `80/10/10` trong tung category bang grouping on dinh va hash, giup han che cung mot nhom lien quan bi roi vao nhieu split.
 
-Mục đích:
+### Frame Extraction
 
-- lưu ảnh khuôn mặt đã căn chỉnh và metadata trong WebDataset shard
-- hỗ trợ resume thông qua shard đã tồn tại và audit CSV
-- tách riêng output theo split khi dùng `--split`
+`frame_extractor.py` doc manifest, trich xuat frame theo `settings.TARGET_FPS` mac dinh `5`, ghi JPG vao `frame_data/<category>/` va append metadata theo tung batch. Resume dua tren:
 
-### Clip Shard
+- `frame_extraction_audit.csv`
+- metadata CSV da co
+- scan frame da ton tai de bootstrap/recover khi can
 
-Được sinh bởi `build_clips.py`.
+### Face Detection
 
-Mục đích:
+Face pipeline:
 
-- gom các frame đã căn chỉnh thành clip có độ dài cố định
-- lưu RGB clip và frame-difference clip dưới dạng `.npy`
-- giữ lại đủ metadata để phục vụ training và truy vết
+- detect bang RetinaFace voi nguong mac dinh `0.9`
+- chon khuon mat chinh dua tren kich thuoc va lien tuc voi bbox truoc
+- detect tren keyframe theo `detect_every_k`
+- noi suy bbox/landmark giua keyframe co detection hop le
+- can chinh bang 5 landmark len align canvas
+- crop vuong quanh bbox da can chinh theo `crop_scale`
+- resize ve `aligned_width x aligned_height`, mac dinh `224 x 224`
+- ghi sample WebDataset gom `json`, anh `jpg/png`, va `cls` neu co label
 
-### Đầu Ra Huấn Luyện
+Khi co `--split`, output va audit duoc tach thanh `crop_data/<split>/` va `audit/<split>/face_detection_audit.csv`.
 
-Được sinh bởi `training/train.py`.
+### Clip Builder
 
-Mục đích:
+`build_clips.py` doc frame shard theo split, group theo `(split, category, video_id)`, yeu cau frame cua mot video phai lien tuc trong shard order, sau do tao sliding-window clip.
 
-- ghi metric theo từng epoch vào `history.json`
-- lưu checkpoint có thể resume
-- lưu mô hình tốt nhất theo logic chọn validation
+Mac dinh:
 
-## Cô Lập Theo Split
+- `clip_len = 8`
+- `frame_stride = 1`
+- `clip_stride = 4`
+- `rgb.npy`: `(T, C, H, W)` uint8
+- `diff.npy`: absolute difference giua frame lien tiep, `(T-1, C, H, W)` uint8
 
-Pipeline preprocessing được thiết kế để chạy `train`, `val`, và `test` một cách độc lập sau khi split đã được gán.
+## Thiet Ke Mo Hinh
 
-Hành vi hiện tại theo từng split:
+Detector co hai nhanh:
 
-- frame metadata có trường `split`
-- face detection có thể lọc bằng `--split`
-- face shard được ghi vào `crop_data/<split>/`
-- file audit của face detection được ghi theo đường dẫn riêng cho từng split
-- clip builder có thể xử lý một split hoặc tự động tìm tất cả thư mục split
-- training sử dụng shard glob tách riêng theo split, ví dụ `clip_data/train/shard-*.tar`
+- spatial branch: `SpatialResNet50`
+- temporal branch: `TemporalDiffCNN`
+- fusion: `FusionHead`
 
-## Thiết Kế Face Detection
+Spatial branch:
 
-Stage face detection hiện tại sử dụng:
+- dung `torchvision.models.resnet50` voi `IMAGENET1K_V2` khi `pretrained=True`
+- xuat feature 2048 chieu
+- texture enhancement lay `layer1`, project len 2048 channel, resize ve kich thuoc semantic feature, concatenate va fuse bang `1x1 conv`
+- spatial attention tao map mot channel va nhan voi feature truoc global average pooling
 
-- RetinaFace để detect
-- chọn khuôn mặt chính dựa trên kích thước và tính liên tục theo thời gian
-- detect ở keyframe và nội suy giữa các lần detect
-- căn chỉnh 5 điểm mốc
-- căn chỉnh lên một canvas vuông lớn hơn
-- crop theo bounding box trong hệ tọa độ đã căn chỉnh
-- resize cuối cùng về kích thước output yêu cầu
+Temporal branch:
 
-Sự tách biệt giữa align canvas và output cuối giúp giữ thêm bối cảnh trước khi crop được resize.
+- input shape `[B, T-1, 3, H, W]`
+- encode tung frame-difference bang CNN residual nhe
+- project moi timestep ve `temporal_feature_dim`, CLI train mac dinh `256`
+- pooling co the la `mean`, `attention`, hoac `gru`
+- CLI train mac dinh `--temporal-pool gru`
+- voi `gru`, dung bidirectional GRU roi project ve lai `feature_dim`
 
-## Thiết Kế Mô Hình
+Fusion head:
 
-Stack training sử dụng detector hai nhánh:
+- concatenate spatial feature va temporal feature
+- MLP voi dropout
+- xuat mot logit cho binary classification
 
-- nhánh không gian: frame RGB đã normalize đưa qua `ResNet50`
-- nhánh thời gian: chuỗi frame-difference đã normalize đưa qua CNN residual nhẹ
-- fusion head: nối đặc trưng rồi đưa qua MLP classifier
+Khi `return_features=True`, detector tra them `spatial_feat`, `temporal_feat`, attention map/feature map spatial va `temporal_attn` neu temporal branch cung cap.
 
-Nhánh thời gian kỳ vọng `clip_len - 1` bước vì `diff.npy` lưu hiệu của các cặp frame liên tiếp.
+## Training Va Checkpoint
 
-Chi tiết hiện tại:
+Training loop:
 
-- `SpatialResNet50` xuất đặc trưng 2048 chiều.
-- Texture enhancement lấy feature nông từ `layer1`, project lên 2048 kênh, resize về kích thước feature semantic, rồi fuse bằng `1x1 conv`.
-- Spatial attention sinh một attention map một kênh bằng `1x1 conv` và nhân với feature map trước global average pooling.
-- `TemporalDiffCNN` encode từng frame-difference độc lập, project về feature 256 chiều trong cấu hình train mặc định, sau đó pool theo thời gian bằng mean hoặc attention.
-- `FusionHead` nối vector không gian và thời gian, dùng MLP với dropout, và trả về một logit cho bài toán nhị phân.
+- `AdamW` voi learning rate rieng cho spatial, temporal va fusion branch
+- `BCEWithLogitsLoss` mac dinh, hoac focal loss
+- auto `pos_weight` tu train shard neu bat
+- AMP tren CUDA theo mac dinh
+- gradient clipping
+- freeze spatial branch trong `spatial_freeze_warmup_epochs` dau
+- `ReduceLROnPlateau(mode="max")` theo selection metric
+- early stopping theo selection metric
 
-Khi gọi `return_features=True`, detector trả thêm các tensor phục vụ debug/visualization như `spatial_feat`, `temporal_feat`, attention map không gian, feature map trung gian, và temporal attention nếu có.
+Selection metric:
 
-## Đánh Giá Và Checkpointing
+- uu tien validation AUC neu tinh duoc
+- fallback sang negative validation loss neu validation chi co mot lop
 
-Huấn luyện tính:
+Checkpoint luu:
 
-- loss
-- accuracy
+- model/optimizer/scheduler/scaler state
+- `TrainConfig`, `ModelConfig`
+- class-balance metadata
+- RNG state
+- best AUC va best selection metric
+
+## Danh Gia
+
+`training.test` load `best.pt`, rebuild model tu `model_config`, chay test shard va ghi:
+
+- `test_metrics.json`
+- `test_predictions.csv`
+
+`training.test_with_best_threshold` bo sung threshold search:
+
+- Youden index
 - F1
-- ROC AUC khi cả hai lớp cùng xuất hiện
+- balanced accuracy
+- threshold thu cong tu `--threshold`
 
-Việc chọn checkpoint sử dụng validation AUC nếu có, và fallback sang negative validation loss nếu không. Checkpoint cũng bao gồm:
-
-- train config
-- model config
-- metadata class-balance
-- optimizer, scheduler, scaler, và RNG state
-
-Training loop có thêm:
-
-- freeze warmup cho nhánh không gian trước khi full fine-tune
-- `ReduceLROnPlateau` chạy trên cùng selection metric với checkpoint
-- early stopping khi metric không cải thiện đủ lâu
-- render figure summary theo epoch vào thư mục `figures/` nếu môi trường hỗ trợ
+Threshold duoc chon cho predictions bang `--prediction-threshold-mode`.
