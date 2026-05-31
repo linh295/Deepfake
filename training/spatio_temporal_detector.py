@@ -24,6 +24,7 @@ class ModelConfig:
     temporal_pool: Literal["mean", "attention", "gru"] = "mean"
     use_spatial_attention: bool = True
     use_texture_enhancement: bool = True
+    use_cross_branch_attention: bool = True
 
 
 class SpatioTemporalDeepfakeDetector(nn.Module):
@@ -57,6 +58,12 @@ class SpatioTemporalDeepfakeDetector(nn.Module):
     def unfreeze_spatial(self) -> None:
         self.spatial_branch.unfreeze()
 
+    def freeze_temporal(self) -> None:
+        self.temporal_branch.freeze()
+
+    def unfreeze_temporal(self) -> None:
+        self.temporal_branch.unfreeze()
+
     def _validate_temporal_input(self, temporal: torch.Tensor) -> None:
         if temporal.ndim != 5:
             raise ValueError(
@@ -75,20 +82,25 @@ class SpatioTemporalDeepfakeDetector(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         self._validate_temporal_input(temporal)
 
+        spatial_feat, spatial_extras = self.spatial_branch(
+            spatial,
+            return_attention=True,
+            return_feature_maps=return_features,
+        )
+        spatial_attn = spatial_extras.get("spatial_attn")
+        temporal_spatial_gate = spatial_attn if self.config.use_cross_branch_attention else None
+
         if return_features:
-            spatial_feat, spatial_extras = self.spatial_branch(
-                spatial,
-                return_attention=True,
-                return_feature_maps=True,
-            )
             temporal_feat, temporal_attn = self.temporal_branch(
                 temporal,
                 return_attention=True,
+                spatial_attention=temporal_spatial_gate,
             )
         else:
-            spatial_feat = self.spatial_branch(spatial)
-            temporal_feat = self.temporal_branch(temporal)
-            spatial_extras = {}
+            temporal_feat = self.temporal_branch(
+                temporal,
+                spatial_attention=temporal_spatial_gate,
+            )
             temporal_attn = None
 
         logits = self.fusion_head(spatial_feat, temporal_feat)

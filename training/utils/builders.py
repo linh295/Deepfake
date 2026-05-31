@@ -73,6 +73,7 @@ def build_model_config(cfg: "TrainConfig") -> ModelConfig:
         temporal_pool=cfg.temporal_pool,
         use_spatial_attention=cfg.use_spatial_attention,
         use_texture_enhancement=cfg.use_texture_enhancement,
+        use_cross_branch_attention=cfg.use_cross_branch_attention,
     )
 
 

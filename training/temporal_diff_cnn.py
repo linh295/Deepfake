@@ -2,6 +2,7 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
@@ -47,6 +48,7 @@ class TemporalDiffCNN(nn.Module):
         gru_layers: int = 2,
     ) -> None:
         super().__init__()
+        self.freeze_branch = False
         # Mở rộng hỗ trợ pool_mode để tránh lỗi tương thích nếu config truyền vào
         if pool_mode not in {"mean", "attention", "gru"}:
             raise ValueError(f"Unsupported pool_mode={pool_mode}")
@@ -111,16 +113,71 @@ class TemporalDiffCNN(nn.Module):
             self.gru_proj = None
             self.attention = None
 
+    def set_trainable(self, trainable: bool) -> None:
+        self.freeze_branch = not trainable
+        for param in self.parameters():
+            param.requires_grad = trainable
+        if self.freeze_branch:
+            self.eval()
+
+    def freeze(self) -> None:
+        self.set_trainable(False)
+
+    def unfreeze(self) -> None:
+        self.set_trainable(True)
+
+    def train(self, mode: bool = True) -> "TemporalDiffCNN":
+        if self.freeze_branch:
+            super().train(False)
+            return self
+        super().train(mode)
+        return self
+
+    def _apply_spatial_attention_gate(
+        self,
+        x: torch.Tensor,
+        spatial_attention: torch.Tensor | None,
+        *,
+        batch_size: int,
+        num_frames: int,
+    ) -> torch.Tensor:
+        if spatial_attention is None:
+            return x
+        if spatial_attention.ndim != 4 or spatial_attention.shape[0] != batch_size:
+            raise ValueError(
+                "Expected spatial_attention with shape [B, 1, H, W], "
+                f"got {tuple(spatial_attention.shape)}"
+            )
+
+        attn = spatial_attention.to(device=x.device, dtype=x.dtype)
+        attn = F.interpolate(
+            attn,
+            size=x.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        attn = attn.repeat_interleave(num_frames, dim=0)
+        return x * attn
+
     def forward(
         self,
         x: torch.Tensor,
         return_attention: bool = False,
+        spatial_attention: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         b, t, c, h, w = x.shape
         
         # 1. Trích xuất đặc trưng không gian trên từng frame độc lập
         x = x.reshape(b * t, c, h, w)
-        x = self.frame_encoder(x)
+        for layer in self.frame_encoder[:-1]:
+            x = layer(x)
+        x = self._apply_spatial_attention_gate(
+            x,
+            spatial_attention,
+            batch_size=b,
+            num_frames=t,
+        )
+        x = self.frame_encoder[-1](x)
         x = self.proj(x)
         x = x.reshape(b, t, self.feature_dim) # Shape: [B, T, feature_dim]
 

@@ -22,7 +22,7 @@ from training.utils.builders import (
 from training.utils.class_balance import build_class_balance_info
 from training.utils.checkpointing import save_checkpoint, write_history
 from training.utils.figures import render_training_figures, resolve_figure_output_dirs
-from training.utils.freezing import set_spatial_branch_trainable
+from training.utils.freezing import apply_training_phase, resolve_alternate_freezing_phase
 from training.utils.loops import train_one_epoch, validate_one_epoch
 from training.utils.metrics import get_current_lrs, select_checkpoint_metric
 from training.utils.progress import build_progress_totals
@@ -53,6 +53,7 @@ class TrainConfig:
     temporal_pool: str = "gru"
     use_spatial_attention: bool = True
     use_texture_enhancement: bool = True
+    use_cross_branch_attention: bool = True
 
     seed: int = 42
     device: str = "cuda"
@@ -69,6 +70,7 @@ class TrainConfig:
     scheduler_threshold: float = 1e-4
     scheduler_min_lr: float = 0.0
     spatial_freeze_warmup_epochs: int = 3
+    temporal_freeze_epochs: int = 3
     
     use_augmentation: bool = False
     augment_recompute_diff: bool = True
@@ -114,6 +116,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--temporal-pool", type=str, choices=["mean", "attention", "gru"], default="gru")
     parser.add_argument("--disable-spatial-attention", action="store_true")
     parser.add_argument("--disable-texture-enhancement", action="store_true")
+    parser.add_argument("--disable-cross-branch-attention", action="store_true")
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
@@ -128,6 +131,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--scheduler-threshold", type=float, default=1e-4)
     parser.add_argument("--scheduler-min-lr", type=float, default=0.0)
     parser.add_argument("--spatial-freeze-warmup-epochs", type=int, default=3)
+    parser.add_argument("--temporal-freeze-epochs", type=int, default=3)
     parser.add_argument("--disable-pin-memory", action="store_true")
     parser.add_argument("--disable-persistent-workers", action="store_true")
     parser.add_argument("--use-augmentation", action="store_true")
@@ -167,6 +171,7 @@ def parse_args() -> TrainConfig:
         temporal_pool=args.temporal_pool,
         use_spatial_attention=not args.disable_spatial_attention,
         use_texture_enhancement=not args.disable_texture_enhancement,
+        use_cross_branch_attention=not args.disable_cross_branch_attention,
         seed=args.seed,
         device=args.device,
         use_amp=not args.disable_amp,
@@ -182,6 +187,7 @@ def parse_args() -> TrainConfig:
         scheduler_threshold=args.scheduler_threshold,
         scheduler_min_lr=args.scheduler_min_lr,
         spatial_freeze_warmup_epochs=args.spatial_freeze_warmup_epochs,
+        temporal_freeze_epochs=args.temporal_freeze_epochs,
         use_augmentation=args.use_augmentation,
         augment_recompute_diff=not args.disable_augment_recompute_diff,
         hflip_prob=args.hflip_prob,
@@ -210,11 +216,17 @@ def main() -> None:
     logger.info("Val shards: {}", cfg.val_shards)
     logger.info("Invert binary labels: {}", cfg.invert_binary_labels)
     logger.info(
-        "Model options | dropout={} | temporal_pool={} | spatial_attention={} | texture_enhancement={}",
+        "Model options | dropout={} | temporal_pool={} | spatial_attention={} | texture_enhancement={} | cross_branch_attention={}",
         cfg.model_dropout,
         cfg.temporal_pool,
         cfg.use_spatial_attention,
         cfg.use_texture_enhancement,
+        cfg.use_cross_branch_attention,
+    )
+    logger.info(
+        "Alternate freezing | spatial_freeze_warmup_epochs={} | temporal_freeze_epochs={}",
+        cfg.spatial_freeze_warmup_epochs,
+        cfg.temporal_freeze_epochs,
     )
 
     train_loader, val_loader = build_dataloaders(cfg)
@@ -251,6 +263,7 @@ def main() -> None:
             "temporal_pool": cfg.temporal_pool,
             "use_spatial_attention": cfg.use_spatial_attention,
             "use_texture_enhancement": cfg.use_texture_enhancement,
+            "use_cross_branch_attention": cfg.use_cross_branch_attention,
         },
         "train": [],
         "val": [],
@@ -271,9 +284,13 @@ def main() -> None:
             )
 
     for epoch in range(1, cfg.epochs + 1):
-        freeze_spatial = epoch <= cfg.spatial_freeze_warmup_epochs
-        phase_name = "temporal_warmup" if freeze_spatial else "full_finetune"
-        set_spatial_branch_trainable(model, trainable=not freeze_spatial)
+        phase = resolve_alternate_freezing_phase(
+            epoch,
+            spatial_freeze_warmup_epochs=cfg.spatial_freeze_warmup_epochs,
+            temporal_freeze_epochs=cfg.temporal_freeze_epochs,
+        )
+        phase_name = phase.name
+        apply_training_phase(model, phase)
 
         epoch_start = time.time()
         train_metrics = train_one_epoch(
