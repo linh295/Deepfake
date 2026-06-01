@@ -159,6 +159,18 @@ Mo hinh gom:
 - temporal branch: CNN tren `diff.npy`, ho tro `mean`, `attention`, `gru`; CLI mac dinh la `gru`
 - fusion head: MLP tren feature khong gian va thoi gian, xuat mot binary logit
 
+Kiem tra tong so tham so cua mo hinh:
+
+```bash
+python -m training.model_parameters
+```
+
+Neu dung `uv`:
+
+```bash
+uv run python -m training.model_parameters
+```
+
 Dau ra training:
 
 - `artifacts/experiments/st_detector/history.json`

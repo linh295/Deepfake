@@ -573,7 +573,7 @@ class TrainModuleTestCase(unittest.TestCase):
             self.assertTrue((figure_dir / f"{stem}.png").exists())
             self.assertTrue((figure_dir / f"{stem}.svg").exists())
 
-    def test_main_logs_class_balance_and_uses_warmup_schedule(self) -> None:
+    def test_main_logs_class_balance_and_uses_alternate_freezing_schedule(self) -> None:
         model = nn.Linear(4, 1)
         optimizer = AdamW(model.parameters(), lr=1e-3)
         scheduler = mock.Mock()
@@ -615,7 +615,7 @@ class TrainModuleTestCase(unittest.TestCase):
              mock.patch("training.train.build_scheduler", return_value=scheduler), \
              mock.patch("training.train.resolve_figure_output_dirs", return_value=mock.Mock(run_dir=self.root / "figures", latest_dir=self.root / "figures" / "latest", best_root_dir=self.root / "figures" / "best")) as resolve_figures_mock, \
              mock.patch("training.train.render_training_figures") as render_figures_mock, \
-             mock.patch("training.train.set_spatial_branch_trainable") as freeze_mock, \
+             mock.patch("training.train.apply_training_phase") as freeze_mock, \
              mock.patch("training.train.train_one_epoch", return_value={"loss": 0.4, "auc": 0.7, "accuracy": 0.8, "f1": 0.75}) as train_epoch_mock, \
              mock.patch("training.train.validate_one_epoch", return_value=({"loss": 0.3, "auc": 0.8, "accuracy": 0.9, "f1": 0.85}, diagnostics)) as val_epoch_mock, \
              mock.patch("training.train.write_history") as write_history_mock, \
@@ -630,8 +630,21 @@ class TrainModuleTestCase(unittest.TestCase):
         self.assertTrue(render_figures_mock.call_args_list[0].kwargs["latest_bundle"])
         self.assertFalse(render_figures_mock.call_args_list[1].kwargs["latest_bundle"])
         self.assertEqual(
-            [call.kwargs["trainable"] for call in freeze_mock.call_args_list],
-            [False, False, False, True],
+            [
+                (
+                    call.args[1].name,
+                    call.args[1].spatial_trainable,
+                    call.args[1].temporal_trainable,
+                    call.args[1].fusion_trainable,
+                )
+                for call in freeze_mock.call_args_list
+            ],
+            [
+                ("temporal_warmup", False, True, True),
+                ("temporal_warmup", False, True, True),
+                ("temporal_warmup", False, True, True),
+                ("spatial_refine_temporal_frozen", True, False, True),
+            ],
         )
         self.assertEqual(train_epoch_mock.call_args_list[0].kwargs["total_batches"], 11)
         self.assertEqual(train_epoch_mock.call_args_list[0].kwargs["stage_label"], "Train 1/4")

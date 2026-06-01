@@ -4,6 +4,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+TemporalPoolMode = Literal[
+    "mean",
+    "attention",
+    "gru",
+    "gru_mean",
+    "gru_max",
+    "gru_mean_max",
+    "gru_attn",
+]
+
+_GRU_POOL_MODES = {"gru", "gru_mean", "gru_max", "gru_mean_max", "gru_attn"}
+_POOL_MODES = {"mean", "attention", *_GRU_POOL_MODES}
+TEMPORAL_POOL_CHOICES = tuple(sorted(_POOL_MODES))
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
         super().__init__()
@@ -42,21 +57,23 @@ class TemporalDiffCNN(nn.Module):
         self,
         in_channels: int = 3,
         feature_dim: int = 512,
-        pool_mode: Literal["mean", "attention", "gru"] = "gru",  # Đặt mặc định là gru
+        pool_mode: TemporalPoolMode = "gru",
         dropout: float = 0.3,
         gru_hidden_dim: int = 256,
         gru_layers: int = 2,
+        use_feature_delta: bool = False,
     ) -> None:
         super().__init__()
         self.freeze_branch = False
         # Mở rộng hỗ trợ pool_mode để tránh lỗi tương thích nếu config truyền vào
-        if pool_mode not in {"mean", "attention", "gru"}:
+        if pool_mode not in _POOL_MODES:
             raise ValueError(f"Unsupported pool_mode={pool_mode}")
 
         self.pool_mode = pool_mode
         self.feature_dim = feature_dim
         self.gru_hidden_dim = gru_hidden_dim
         self.gru_layers = gru_layers
+        self.use_feature_delta = use_feature_delta
 
         # Backbone trích xuất đặc trưng từng khung hình (Giữ nguyên cấu trúc của bạn)
         self.frame_encoder = nn.Sequential(
@@ -81,28 +98,41 @@ class TemporalDiffCNN(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # Cấu hình nhánh tuần tự thời gian dựa trên chế độ pool_mode
-        if self.pool_mode == "gru":
+        gru_input_dim = feature_dim * 2 if use_feature_delta else feature_dim
+        gru_out_dim = gru_hidden_dim * 2
+
+        # Cấu hình nhánh tuần tự thời gian dựa trên chế độ pool_mode.
+        # Các mode gru* đều chạy cùng 2-layer Bidirectional GRU, khác nhau ở pooling trên gru_out.
+        if self.pool_mode in _GRU_POOL_MODES:
             # Khởi tạo Bidirectional GRU đa tầng
             self.gru = nn.GRU(
-                input_size=feature_dim,
+                input_size=gru_input_dim,
                 hidden_size=gru_hidden_dim,
                 num_layers=gru_layers,
                 batch_first=True,
                 bidirectional=True,
                 dropout=dropout if gru_layers > 1 else 0.0,
             )
-            # Lớp tuyến tính gộp output 2 chiều (gru_hidden_dim * 2) về lại kích thước feature_dim cho Fusion
+            gru_proj_in_dim = gru_out_dim * 2 if self.pool_mode == "gru_mean_max" else gru_out_dim
             self.gru_proj = nn.Sequential(
-                nn.Linear(gru_hidden_dim * 2, feature_dim),
+                nn.Linear(gru_proj_in_dim, feature_dim),
                 nn.BatchNorm1d(feature_dim),
                 nn.ReLU(inplace=True),
                 nn.Dropout(dropout),
             )
+            if self.pool_mode == "gru_attn":
+                self.gru_attention = nn.Sequential(
+                    nn.Linear(gru_out_dim, gru_out_dim // 2),
+                    nn.Tanh(),
+                    nn.Linear(gru_out_dim // 2, 1),
+                )
+            else:
+                self.gru_attention = None
             self.attention = None
         elif self.pool_mode == "attention":
             self.gru = None
             self.gru_proj = None
+            self.gru_attention = None
             self.attention = nn.Sequential(
                 nn.Linear(feature_dim, feature_dim // 2),
                 nn.Tanh(),
@@ -111,6 +141,7 @@ class TemporalDiffCNN(nn.Module):
         else:
             self.gru = None
             self.gru_proj = None
+            self.gru_attention = None
             self.attention = None
 
     def set_trainable(self, trainable: bool) -> None:
@@ -159,6 +190,16 @@ class TemporalDiffCNN(nn.Module):
         attn = attn.repeat_interleave(num_frames, dim=0)
         return x * attn
 
+    def _append_feature_delta(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.use_feature_delta:
+            return x
+
+        # Feature delta concatenates |x_t - x_{t-1}| to each timestep before GRU.
+        delta = torch.abs(x[:, 1:, :] - x[:, :-1, :])
+        zero_delta = torch.zeros_like(delta[:, :1, :])
+        delta = torch.cat([zero_delta, delta], dim=1)
+        return torch.cat([x, delta], dim=-1)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -181,29 +222,63 @@ class TemporalDiffCNN(nn.Module):
         x = self.proj(x)
         x = x.reshape(b, t, self.feature_dim) # Shape: [B, T, feature_dim]
 
-        # ---- CHẾ ĐỘ GRU (MỚI TỐI ƯU HÓA) ----
-        if self.pool_mode == "gru":
+        if self.pool_mode in _GRU_POOL_MODES:
+            x = self._append_feature_delta(x)
             # gru_out shape: [B, T, gru_hidden_dim * 2]
             # hn shape: [num_layers * 2, B, gru_hidden_dim]
             gru_out, hn = self.gru(x)
-            
-            # Trích xuất trạng thái ẩn cuối cùng của cả 2 chiều:
-            # Chiều xuôi (Forward): Lấy bước thời gian cuối cùng của nửa đầu hidden_dim -> gru_out[:, -1, :gru_hidden_dim]
-            # Chiều ngược (Backward): Lấy bước thời gian đầu tiên của nửa sau hidden_dim -> gru_out[:, 0, gru_hidden_dim:]
-            # Thay vì trích xuất thủ công phức tạp từ gru_out, cấu trúc hn cho phép ta lấy trực tiếp:
-            # hn[-2] là tầng cuối cùng của chiều xuôi, hn[-1] là tầng cuối cùng của chiều ngược.
-            
-            feat_forward = hn[-2]   # Shape: [B, gru_hidden_dim]
-            feat_backward = hn[-1]  # Shape: [B, gru_hidden_dim]
-            
-            # Khôi phục liên kết không gian bằng cách ghép cặp đặc trưng 2 chiều
-            pooled = torch.cat([feat_forward, feat_backward], dim=-1) # Shape: [B, gru_hidden_dim * 2]
-            pooled = self.gru_proj(pooled) # Hạ chiều về lại [B, feature_dim]
 
+            if self.pool_mode == "gru":
+                # Final hidden pooling: giữ nguyên behavior cũ để backward compatibility.
+                feat_forward = hn[-2]   # Shape: [B, gru_hidden_dim]
+                feat_backward = hn[-1]  # Shape: [B, gru_hidden_dim]
+                pooled = torch.cat([feat_forward, feat_backward], dim=-1)
+                pooled = self.gru_proj(pooled)
+
+                if return_attention:
+                    dummy_attn = torch.full((b, t, 1), fill_value=1.0 / max(1, t), dtype=x.dtype, device=x.device)
+                    return pooled, dummy_attn
+                return pooled
+
+            if self.pool_mode == "gru_mean":
+                # Mean pooling: dùng toàn bộ chuỗi hidden states của BiGRU.
+                pooled = gru_out.mean(dim=1)
+                pooled = self.gru_proj(pooled)
+
+                if return_attention:
+                    uniform_attn = torch.full((b, t, 1), fill_value=1.0 / max(1, t), dtype=x.dtype, device=x.device)
+                    return pooled, uniform_attn
+                return pooled
+
+            if self.pool_mode == "gru_max":
+                # Max pooling: nhấn mạnh timestep có activation mạnh nhất trên từng channel.
+                pooled = gru_out.max(dim=1).values
+                pooled = self.gru_proj(pooled)
+
+                if return_attention:
+                    uniform_attn = torch.full((b, t, 1), fill_value=1.0 / max(1, t), dtype=x.dtype, device=x.device)
+                    return pooled, uniform_attn
+                return pooled
+
+            if self.pool_mode == "gru_mean_max":
+                # Mean + max pooling: concat thống kê toàn cục và activation peak, rồi project về feature_dim.
+                mean_feat = gru_out.mean(dim=1)
+                max_feat = gru_out.max(dim=1).values
+                pooled = torch.cat([mean_feat, max_feat], dim=-1)
+                pooled = self.gru_proj(pooled)
+
+                if return_attention:
+                    uniform_attn = torch.full((b, t, 1), fill_value=1.0 / max(1, t), dtype=x.dtype, device=x.device)
+                    return pooled, uniform_attn
+                return pooled
+
+            # Learned attention pooling: học trọng số timestep trực tiếp trên gru_out.
+            attn_logits = self.gru_attention(gru_out)
+            attn_weights = torch.softmax(attn_logits, dim=1)
+            pooled = (gru_out * attn_weights).sum(dim=1)
+            pooled = self.gru_proj(pooled)
             if return_attention:
-                # Trả về ma trận trọng số đồng nhất làm dummy data để không gây lỗi crash luồng code cũ
-                dummy_attn = torch.full((b, t, 1), fill_value=1.0 / max(1, t), dtype=x.dtype, device=x.device)
-                return pooled, dummy_attn
+                return pooled, attn_weights
             return pooled
 
         # ---- CÁC CHẾ ĐỘ CŨ (ĐỂ BẢO TOÀN COMPATIBILITY) ----

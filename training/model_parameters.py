@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from training.spatio_temporal_detector import ModelConfig, SpatioTemporalDeepfakeDetector
+from training.temporal_diff_cnn import TEMPORAL_POOL_CHOICES
 
 
 def format_count(value: int) -> str:
@@ -60,6 +61,7 @@ def build_model_config(args: argparse.Namespace, checkpoint: object | None) -> M
         use_spatial_attention=not args.disable_spatial_attention,
         use_texture_enhancement=not args.disable_texture_enhancement,
         use_cross_branch_attention=not args.disable_cross_branch_attention,
+        use_feature_delta=args.use_feature_delta,
     )
 
 
@@ -111,7 +113,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Count parameters in the spatio-temporal detector.")
     parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint path, e.g. artifacts/.../best.pt")
     parser.add_argument("--clip-len", type=int, default=8, help="Clip length used by training. Temporal frames = clip_len - 1.")
-    parser.add_argument("--temporal-pool", choices=["mean", "attention", "gru"], default="gru")
+    parser.add_argument("--temporal-pool", choices=TEMPORAL_POOL_CHOICES, default="gru")
     parser.add_argument("--temporal-feature-dim", type=int, default=256)
     parser.add_argument("--fusion-hidden-dim", type=int, default=512)
     parser.add_argument("--dropout", type=float, default=0.3)
@@ -121,6 +123,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-spatial-attention", action="store_true")
     parser.add_argument("--disable-texture-enhancement", action="store_true")
     parser.add_argument("--disable-cross-branch-attention", action="store_true")
+    parser.add_argument("--use-feature-delta", action="store_true")
     return parser.parse_args()
 
 

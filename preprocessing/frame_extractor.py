@@ -541,6 +541,10 @@ class FrameExtractor:
         self.resume = resume
         self.categories = settings.DATASET_CATEGORIES
         self.manifest_rows = self._load_video_manifest()
+        self.categories = {
+            **self.categories,
+            **{str(row["category"]): str(row["label"]) for row in self.manifest_rows},
+        }
         self.manifest_index = {
             (str(row["category"]), str(row["video_id"])): row for row in self.manifest_rows
         }
@@ -580,9 +584,9 @@ class FrameExtractor:
                 if binary_label_raw in {"0", "1"}:
                     binary_label = int(binary_label_raw)
                 else:
-                    binary_label = 0 if self.categories.get(category) == "real" else 1
+                    binary_label = 1 if self.categories.get(category) == "real" else 0
 
-                label = "real" if binary_label == 0 else "fake"
+                label = "real" if binary_label == 1 else "fake"
                 absolute_video_path = (self.dataset_path / PurePosixPath(video_rel_path)).resolve()
 
                 manifest_rows.append(
@@ -1067,7 +1071,8 @@ class FrameExtractor:
             init_csv(audit_path, AUDIT_FIELDNAMES)
             self.completed_video_keys = set()
 
-        categories = [only_category] if only_category else list(self.categories.keys())
+        manifest_categories = sorted({str(row["category"]) for row in self.manifest_rows})
+        categories = [only_category] if only_category else manifest_categories
         total_new_frames = 0
 
         for category in categories:
@@ -1095,6 +1100,10 @@ def main() -> None:
         default=None,
         help="Path to video-level manifest CSV, defaults to artifacts/videos_master.csv",
     )
+    parser.add_argument("--dataset-dir", type=Path, default=None, help="Dataset root directory")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Directory to save extracted frames")
+    parser.add_argument("--metadata-csv", type=str, default=None, help="Metadata CSV name under output dir")
+    parser.add_argument("--audit-csv", type=str, default=None, help="Audit CSV name under output dir")
     parser.add_argument("--workers", type=int, default=None, help="Override number of workers")
     parser.add_argument("--fps", type=int, default=None, help="Override target FPS")
     parser.add_argument("--jpeg-quality", type=int, default=None, help="Override JPEG quality (0-100)")
@@ -1104,7 +1113,11 @@ def main() -> None:
     setup_logging()
 
     extractor = FrameExtractor(
+        dataset_path=args.dataset_dir,
+        output_path=args.output_dir,
+        metadata_csv=args.metadata_csv,
         manifest_path=args.manifest,
+        audit_csv=args.audit_csv,
         fps=args.fps,
         jpeg_quality=args.jpeg_quality,
         num_workers=args.workers,

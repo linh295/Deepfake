@@ -277,7 +277,8 @@ Moi row trong `val` gom cac metric tren va:
 `phase`:
 
 - `temporal_warmup` khi spatial branch dang freeze.
-- `full_finetune` sau warmup.
+- `spatial_refine_temporal_frozen` khi temporal branch dang freeze sau warmup.
+- `full_finetune` sau alternate freezing.
 
 ## 8. Checkpoint `.pt`
 

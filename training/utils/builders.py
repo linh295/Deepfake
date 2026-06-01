@@ -74,6 +74,7 @@ def build_model_config(cfg: "TrainConfig") -> ModelConfig:
         use_spatial_attention=cfg.use_spatial_attention,
         use_texture_enhancement=cfg.use_texture_enhancement,
         use_cross_branch_attention=cfg.use_cross_branch_attention,
+        use_feature_delta=cfg.use_feature_delta,
     )
 
 

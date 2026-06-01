@@ -1,0 +1,31 @@
+video_id,video_path,category,binary_label,label,split
+008_990,visualize/deepfake/008_990.mp4,deepfake,0,fake,test
+008_990,visualize/face2face/008_990.mp4,face2face,0,fake,test
+008_990,visualize/faceshifter/008_990.mp4,faceshifter,0,fake,test
+008_990,visualize/faceswap/008_990.mp4,faceswap,0,fake,test
+008_990,visualize/neural textures/008_990.mp4,neural textures,0,fake,test
+008_990,visualize/original/008.mp4,original,1,real,test
+007_132,visualize/deepfake/007_132.mp4,deepfake,0,fake,test
+007_132,visualize/face2face/007_132.mp4,face2face,0,fake,test
+007_132,visualize/faceshifter/007_132.mp4,faceshifter,0,fake,test
+007_132,visualize/faceswap/007_132.mp4,faceswap,0,fake,test
+007_132,visualize/neural textures/007_132.mp4,neural textures,0,fake,test
+007_132,visualize/original/007.mp4,original,1,real,test
+010_005,visualize/deepfake/010_005.mp4,deepfake,0,fake,test
+010_005,visualize/face2face/010_005.mp4,face2face,0,fake,test
+010_005,visualize/faceshifter/010_005.mp4,faceshifter,0,fake,test
+010_005,visualize/faceswap/010_005.mp4,faceswap,0,fake,test
+010_005,visualize/neural textures/010_005.mp4,neural textures,0,fake,test
+010_005,visualize/original/010.mp4,original,1,real,test
+009_027,visualize/deepfake/009_027.mp4,deepfake,0,fake,test
+009_027,visualize/face2face/009_027.mp4,face2face,0,fake,test
+009_027,visualize/faceshifter/009_027.mp4,faceshifter,0,fake,test
+009_027,visualize/faceswap/009_027.mp4,faceswap,0,fake,test
+009_027,visualize/neural textures/009_027.mp4,neural textures,0,fake,test
+009_027,visualize/original/009.mp4,original,1,real,test
+006_002,visualize/deepfake/006_002.mp4,deepfake,0,fake,test
+006_002,visualize/face2face/006_002.mp4,face2face,0,fake,test
+006_002,visualize/faceshifter/006_002.mp4,faceshifter,0,fake,test
+006_002,visualize/faceswap/006_002.mp4,faceswap,0,fake,test
+006_002,visualize/neural textures/006_002.mp4,neural textures,0,fake,test
+006_002,visualize/original/006.mp4,original,1,real,test

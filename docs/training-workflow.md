@@ -66,10 +66,13 @@ Optimizer/scheduler:
 Model:
 
 - `--model-dropout`
-- `--temporal-pool {mean,attention,gru}`
+- `--temporal-pool {mean,attention,gru,gru_mean,gru_max,gru_mean_max,gru_attn}`
 - `--disable-spatial-attention`
 - `--disable-texture-enhancement`
+- `--disable-cross-branch-attention`
+- `--use-feature-delta`
 - `--spatial-freeze-warmup-epochs`
+- `--temporal-freeze-epochs`
 
 Augmentation:
 
@@ -129,15 +132,21 @@ Spatial branch:
 - ResNet50 ImageNet.
 - Texture enhancement mac dinh bat.
 - Spatial attention mac dinh bat.
-- Co the freeze trong warmup bang `--spatial-freeze-warmup-epochs`.
+- Alternate freezing mac dinh:
+  - epoch 1 den `--spatial-freeze-warmup-epochs`: freeze spatial, train temporal + fusion.
+  - `--temporal-freeze-epochs` epoch tiep theo: freeze temporal, train spatial + fusion.
+  - sau do: train full model.
 
 Temporal branch:
 
 - Input la `diff.npy`, do dai `clip_len - 1`.
 - CNN residual encode tung timestep.
+- Mac dinh nhan spatial attention map tu spatial branch vao temporal feature map truoc global pooling va GRU.
+- `--use-feature-delta`: concat `|x_t - x_{t-1}|` vao feature tung timestep truoc GRU.
 - `--temporal-pool mean`: average theo thoi gian.
 - `--temporal-pool attention`: learned attention theo timestep.
-- `--temporal-pool gru`: bidirectional GRU tren chuoi feature; day la mac dinh cua CLI train hien tai.
+- `--temporal-pool gru`: bidirectional GRU voi final hidden pooling; day la mac dinh cua CLI train hien tai.
+- `--temporal-pool gru_mean`, `gru_max`, `gru_mean_max`, `gru_attn`: ablation variants pooling tren toan bo `gru_out`.
 
 Fusion head:
 

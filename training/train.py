@@ -27,6 +27,7 @@ from training.utils.loops import train_one_epoch, validate_one_epoch
 from training.utils.metrics import get_current_lrs, select_checkpoint_metric
 from training.utils.progress import build_progress_totals
 from training.utils.runtime import resolve_device, set_seed
+from training.temporal_diff_cnn import TEMPORAL_POOL_CHOICES
 
 
 @dataclass
@@ -54,6 +55,7 @@ class TrainConfig:
     use_spatial_attention: bool = True
     use_texture_enhancement: bool = True
     use_cross_branch_attention: bool = True
+    use_feature_delta: bool = False
 
     seed: int = 42
     device: str = "cuda"
@@ -113,10 +115,11 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--max-pos-weight", type=float, default=None)
 
     parser.add_argument("--model-dropout", type=float, default=0.3)
-    parser.add_argument("--temporal-pool", type=str, choices=["mean", "attention", "gru"], default="gru")
+    parser.add_argument("--temporal-pool", type=str, choices=TEMPORAL_POOL_CHOICES, default="gru")
     parser.add_argument("--disable-spatial-attention", action="store_true")
     parser.add_argument("--disable-texture-enhancement", action="store_true")
     parser.add_argument("--disable-cross-branch-attention", action="store_true")
+    parser.add_argument("--use-feature-delta", action="store_true")
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
@@ -172,6 +175,7 @@ def parse_args() -> TrainConfig:
         use_spatial_attention=not args.disable_spatial_attention,
         use_texture_enhancement=not args.disable_texture_enhancement,
         use_cross_branch_attention=not args.disable_cross_branch_attention,
+        use_feature_delta=args.use_feature_delta,
         seed=args.seed,
         device=args.device,
         use_amp=not args.disable_amp,
@@ -216,12 +220,13 @@ def main() -> None:
     logger.info("Val shards: {}", cfg.val_shards)
     logger.info("Invert binary labels: {}", cfg.invert_binary_labels)
     logger.info(
-        "Model options | dropout={} | temporal_pool={} | spatial_attention={} | texture_enhancement={} | cross_branch_attention={}",
+        "Model options | dropout={} | temporal_pool={} | spatial_attention={} | texture_enhancement={} | cross_branch_attention={} | feature_delta={}",
         cfg.model_dropout,
         cfg.temporal_pool,
         cfg.use_spatial_attention,
         cfg.use_texture_enhancement,
         cfg.use_cross_branch_attention,
+        cfg.use_feature_delta,
     )
     logger.info(
         "Alternate freezing | spatial_freeze_warmup_epochs={} | temporal_freeze_epochs={}",
@@ -264,6 +269,7 @@ def main() -> None:
             "use_spatial_attention": cfg.use_spatial_attention,
             "use_texture_enhancement": cfg.use_texture_enhancement,
             "use_cross_branch_attention": cfg.use_cross_branch_attention,
+            "use_feature_delta": cfg.use_feature_delta,
         },
         "train": [],
         "val": [],

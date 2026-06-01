@@ -145,10 +145,13 @@ Temporal branch:
 
 - input shape `[B, T-1, 3, H, W]`
 - encode tung frame-difference bang CNN residual nhe
+- neu `use_cross_branch_attention=True`, spatial attention map `[B, 1, Hs, Ws]` duoc resize va nhan vao temporal feature map cua tung frame truoc global average pooling
 - project moi timestep ve `temporal_feature_dim`, CLI train mac dinh `256`
+- neu `use_feature_delta=True`, concat `|x_t - x_{t-1}|` vao feature tung timestep truoc GRU
 - pooling co the la `mean`, `attention`, hoac `gru`
 - CLI train mac dinh `--temporal-pool gru`
-- voi `gru`, dung bidirectional GRU roi project ve lai `feature_dim`
+- voi `gru`, dung bidirectional GRU final hidden pooling roi project ve lai `feature_dim`
+- cac bien the ablation `gru_mean`, `gru_max`, `gru_mean_max`, `gru_attn` pooling tren toan bo `gru_out`
 
 Fusion head:
 
@@ -167,7 +170,7 @@ Training loop:
 - auto `pos_weight` tu train shard neu bat
 - AMP tren CUDA theo mac dinh
 - gradient clipping
-- freeze spatial branch trong `spatial_freeze_warmup_epochs` dau
+- alternate freezing: freeze spatial trong `spatial_freeze_warmup_epochs` dau, freeze temporal trong `temporal_freeze_epochs` tiep theo, sau do train full model
 - `ReduceLROnPlateau(mode="max")` theo selection metric
 - early stopping theo selection metric
 

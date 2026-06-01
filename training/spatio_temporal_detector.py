@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
-
 import torch
 import torch.nn as nn
 
 from training.fusion_head import FusionHead
 from training.spatial_resnet50 import SpatialResNet50
-from training.temporal_diff_cnn import TemporalDiffCNN
+from training.temporal_diff_cnn import TemporalDiffCNN, TemporalPoolMode
 
 
 @dataclass
@@ -21,10 +19,11 @@ class ModelConfig:
     dropout: float = 0.5
     pretrained: bool = True
     freeze_spatial_backbone: bool = False
-    temporal_pool: Literal["mean", "attention", "gru"] = "mean"
+    temporal_pool: TemporalPoolMode = "mean"
     use_spatial_attention: bool = True
     use_texture_enhancement: bool = True
     use_cross_branch_attention: bool = True
+    use_feature_delta: bool = False
 
 
 class SpatioTemporalDeepfakeDetector(nn.Module):
@@ -43,6 +42,7 @@ class SpatioTemporalDeepfakeDetector(nn.Module):
             feature_dim=config.temporal_feature_dim,
             pool_mode=config.temporal_pool,
             dropout=config.dropout,
+            use_feature_delta=config.use_feature_delta,
         )
         self.fusion_head = FusionHead(
             spatial_dim=self.spatial_branch.out_dim,

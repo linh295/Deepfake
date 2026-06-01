@@ -20,6 +20,9 @@ CATEGORY_TO_BINARY_LABEL: Dict[str, int] = {
     "FaceShifter": 0,
     "FaceSwap": 0,
     "NeuralTextures": 0,
+    "Celeb-real": 1,
+    "YouTube-real": 1,
+    "Celeb-synthesis": 0,
 }
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -63,6 +66,36 @@ def parse_args() -> argparse.Namespace:
         help="Number of worker threads used to read video metadata.",
     )
     return parser.parse_args()
+
+
+def infer_compression(dataset_dir: Path) -> str:
+    name = dataset_dir.name.lower()
+    if "celeb" in name:
+        return "celeb-dc"
+    if "c40" in name:
+        return "c40"
+    if "c23" in name:
+        return "c23"
+    return "unknown"
+
+
+def read_official_test_paths(dataset_dir: Path) -> set[str]:
+    split_file = dataset_dir / "List_of_testing_videos.txt"
+    if not split_file.exists():
+        return set()
+
+    test_paths: set[str] = set()
+    with split_file.open("r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            test_paths.add(Path(parts[1]).as_posix())
+    return test_paths
+
+
+def should_mark_all_as_test(dataset_dir: Path) -> bool:
+    return dataset_dir.name.lower() in {"celeb_dc", "celeb-dc"}
 
 
 def iter_video_files(dataset_dir: Path) -> Iterable[Tuple[str, Path]]:
@@ -149,12 +182,47 @@ def assign_splits(records: List[Dict[str, object]]) -> Dict[str, str]:
     return split_by_group
 
 
+def assign_train_val_splits(records: List[Dict[str, object]]) -> Dict[str, str]:
+    split_by_group: Dict[str, str] = {}
+    records_by_category: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+
+    for record in records:
+        records_by_category[str(record["category"])].append(record)
+
+    for category_records in records_by_category.values():
+        group_weights: Dict[str, int] = {}
+        for record in category_records:
+            group_key = str(record["_split_group"])
+            group_weights[group_key] = group_weights.get(group_key, 0) + 1
+
+        ordered_groups = sorted(
+            group_weights.items(),
+            key=lambda item: (-item[1], stable_hash(item[0])),
+        )
+        total_rows = sum(group_weights.values())
+        targets = {"train": total_rows * 0.9, "val": total_rows * 0.1}
+        counts = {"train": 0, "val": 0}
+
+        for group_key, weight in ordered_groups:
+            split = max(
+                ("train", "val"),
+                key=lambda name: (targets[name] - counts[name], name == "train"),
+            )
+            split_by_group[group_key] = split
+            counts[split] += weight
+
+    return split_by_group
+
+
 def collect_records(dataset_dir: Path, workers: int) -> List[Dict[str, object]]:
     tasks = list(iter_video_files(dataset_dir))
     if not tasks:
         raise FileNotFoundError(f"No video files found under: {dataset_dir}")
 
     records: List[Dict[str, object]] = []
+    compression = infer_compression(dataset_dir)
+    official_test_paths = read_official_test_paths(dataset_dir)
+    mark_all_as_test = should_mark_all_as_test(dataset_dir)
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         future_to_item = {
@@ -176,16 +244,34 @@ def collect_records(dataset_dir: Path, workers: int) -> List[Dict[str, object]]:
                     "video_path": relative_path,
                     "category": category,
                     "binary_label": CATEGORY_TO_BINARY_LABEL[category],
-                    "compression": "c23",
+                    "compression": compression,
                     "original_fps": fps,
                     "num_frames": num_frames,
                     "_split_group": split_group,
                 }
             )
 
-    split_by_group = assign_splits(records)
+    if mark_all_as_test:
+        for record in records:
+            record["split"] = "test"
+    elif official_test_paths:
+        train_val_records = [
+            record
+            for record in records
+            if str(record["video_path"]) not in official_test_paths
+        ]
+        split_by_group = assign_train_val_splits(train_val_records)
+        for record in records:
+            if str(record["video_path"]) in official_test_paths:
+                record["split"] = "test"
+            else:
+                record["split"] = split_by_group[str(record["_split_group"])]
+    else:
+        split_by_group = assign_splits(records)
+        for record in records:
+            record["split"] = split_by_group[str(record["_split_group"])]
+
     for record in records:
-        record["split"] = split_by_group[str(record["_split_group"])]
         record.pop("_split_group", None)
 
     records.sort(key=lambda row: (str(row["category"]), str(row["video_id"])))

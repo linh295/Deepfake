@@ -453,7 +453,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--clip-len", type=int, default=8, help="Number of frames per clip")
     parser.add_argument("--frame-stride", type=int, default=1, help="Frame step inside each clip")
-    parser.add_argument("--clip-stride", type=int, default=4, help="Clip sliding-window stride")
+    parser.add_argument("--clip-stride", type=int, default=6, help="Clip sliding-window stride")
     parser.add_argument("--shard-maxcount", type=int, default=2000, help="Maximum clips per output shard")
     parser.add_argument("--shard-maxsize", type=int, default=2_000_000_000, help="Maximum bytes per output shard")
     parser.add_argument("--overwrite", action="store_true", help="Delete existing output shards for the target split before rebuilding")

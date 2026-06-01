@@ -63,3 +63,12 @@ FaceForensics++_C40/
 .tmp-tests/
 artifacts3/
 figures3/
+Celeb_DC/
+docs/paper_comparison/
+frame_data_celeb_dc/
+visualize/
+clip_data_celeb_subset_clean/
+crop_data_celeb_subset_clean/
+clip_data/
+crop_data_celeb_dc/
+clip_data_celeb_dc/
