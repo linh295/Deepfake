@@ -140,8 +140,6 @@ class FaceDetectionTestCase(unittest.TestCase):
         self.assertEqual(fd.infer_start_shard(output_dir), 4)
         self.assertEqual(fd.load_processed_keys_from_existing_shards(output_dir), {"original/vid1/frame_00001"})
         self.assertEqual(fd._interpolate_bbox([0, 0, 10, 10], [10, 10, 20, 20], 0.5), [5, 5, 15, 15])
-        self.assertEqual(fd._infer_align_canvas_size((112, 112)), (320, 320))
-        self.assertEqual(fd._infer_align_canvas_size((224, 160)), (336, 336))
 
         landmarks = {
             "left_eye": [0.0, 0.0],
@@ -214,6 +212,20 @@ class FaceDetectionTestCase(unittest.TestCase):
             "original/video1/video1_frame_00001",
             "original/video1/video1_frame_00002",
         ])
+
+    def test_detection_error_preserves_exception_message(self) -> None:
+        image = np.zeros((96, 96, 3), dtype=np.uint8)
+        detector = StubDetector({0: RuntimeError("tensorflow inference failed")})
+
+        record = fd.detect_main_face_on_array(
+            image=image,
+            threshold=0.9,
+            max_side=640,
+            detector_module=detector,
+        )
+
+        self.assertEqual(record.status, "detect_error")
+        self.assertIn("RuntimeError: tensorflow inference failed", record.error_message)
 
     def test_run_skips_processed_keys_from_audit_and_preserves_cli_surface(self) -> None:
         rows = [

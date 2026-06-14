@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,58 @@ from dataloader.dataset import ClipDatasetConfig, build_clip_dataloader
 from training.spatio_temporal_detector import ModelConfig, SpatioTemporalDeepfakeDetector
 from training.utils.checkpointing import load_checkpoint
 from training.utils.runtime import resolve_device, set_seed
+
+
+def _expand_local_shard_pattern(pattern: str) -> list[Path]:
+    brace_match = re.search(r"\{(\d+)\.\.(\d+)\}", pattern)
+    if brace_match:
+        start_raw, end_raw = brace_match.groups()
+        start = int(start_raw)
+        end = int(end_raw)
+        width = max(len(start_raw), len(end_raw))
+        step = 1 if end >= start else -1
+        paths = []
+        for idx in range(start, end + step, step):
+            expanded = pattern[: brace_match.start()] + f"{idx:0{width}d}" + pattern[brace_match.end() :]
+            paths.append(Path(expanded))
+        return paths
+
+    globbed = sorted(Path(path) for path in glob.glob(pattern))
+    if globbed:
+        return globbed
+    return [Path(pattern)]
+
+
+def _nearby_shard_hints(pattern: str) -> list[str]:
+    static_prefix = re.split(r"[\{\*\?]", pattern, maxsplit=1)[0]
+    base = Path(static_prefix)
+    search_root = base if base.is_dir() else base.parent
+    if not search_root.exists():
+        search_root = search_root.parent
+    if not search_root.exists():
+        return []
+
+    hints = sorted(str(path) for path in search_root.glob("**/shard-*.tar"))[:20]
+    return hints
+
+
+def validate_local_shards(pattern: str) -> list[Path]:
+    paths = _expand_local_shard_pattern(pattern)
+    missing = [path for path in paths if not path.is_file()]
+    existing = [path for path in paths if path.is_file()]
+    if missing:
+        hints = _nearby_shard_hints(pattern)
+        hint_text = ""
+        if hints:
+            hint_text = "\nNearby shard files found:\n  " + "\n  ".join(hints)
+        raise FileNotFoundError(
+            "Test shard pattern does not resolve to existing local files.\n"
+            f"Pattern: {pattern}\n"
+            f"Missing first file: {missing[0]}\n"
+            f"Existing files matched: {len(existing)}/{len(paths)}"
+            f"{hint_text}"
+        )
+    return paths
 
 
 def _build_model_from_checkpoint(ckpt: dict[str, Any], device: torch.device) -> SpatioTemporalDeepfakeDetector:
@@ -310,6 +364,18 @@ def main() -> None:
     logger.info("Manual threshold: {}", args.threshold)
     logger.info("Prediction threshold mode: {}", args.prediction_threshold_mode)
 
+    resolved_shards = validate_local_shards(args.test_shards)
+    logger.info("Resolved test shards: {} files", len(resolved_shards))
+    logger.info("First test shard: {}", resolved_shards[0])
+
+    pin_memory = not args.disable_pin_memory and device.type == "cuda"
+    persistent_workers = (
+        not args.disable_persistent_workers
+        and args.num_workers > 0
+    )
+    if not args.disable_pin_memory and device.type != "cuda":
+        logger.info("Pin memory disabled automatically for device={}", device.type)
+
     test_cfg = ClipDatasetConfig(
         shard_pattern=args.test_shards,
         clip_len=args.clip_len,
@@ -319,8 +385,8 @@ def main() -> None:
         seed=args.seed,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        pin_memory=not args.disable_pin_memory,
-        persistent_workers=not args.disable_persistent_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
         drop_last=False,
         use_augmentation=False,
         augment_recompute_diff=False,

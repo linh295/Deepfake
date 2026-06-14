@@ -101,27 +101,26 @@ class FaceDetectionCropTestCase(unittest.TestCase):
             retinaface_cache_dir=self.root / "retinaface_cache",
         )
 
-    def test_bbox_transform_and_square_crop_helpers(self) -> None:
+    def test_bbox_square_crop_does_not_align_or_rotate(self) -> None:
         bbox = [10, 10, 30, 40]
-        matrix = np.array([[1.0, 0.0, 5.0], [0.0, 1.0, 7.0]], dtype=np.float32)
-        transformed = fd._transform_bbox_with_affine(bbox, matrix)
-        self.assertEqual(transformed, [15.0, 17.0, 35.0, 47.0])
-
-        crop_box = fd._build_square_crop_box(transformed, image_size=(64, 64), crop_scale=1.3)
+        crop_box = fd._build_square_crop_box(bbox, image_size=(64, 64), crop_scale=1.3)
         self.assertIsNotNone(crop_box)
         assert crop_box is not None
         self.assertEqual(crop_box[2] - crop_box[0], crop_box[3] - crop_box[1])
 
-        aligned_image = np.full((64, 64, 3), 128, dtype=np.uint8)
-        cropped, resolved_box, status = fd.crop_aligned_face_from_bbox(
-            aligned_image=aligned_image,
-            aligned_bbox=transformed,
+        image = np.zeros((64, 64, 3), dtype=np.uint8)
+        image[:, :32] = 50
+        image[:, 32:] = 200
+        cropped, resolved_box, status = fd.crop_face_from_bbox(
+            image=image,
+            bbox=bbox,
             crop_scale=1.3,
             output_size=(112, 112),
         )
         self.assertEqual(status, "ok")
         self.assertEqual(cropped.shape[:2], (112, 112))
         self.assertEqual(crop_box, resolved_box)
+        self.assertLess(float(cropped[:, :56].mean()), float(cropped[:, 56:].mean()))
 
     def test_process_video_writes_crop_metadata(self) -> None:
         rows = [
@@ -164,7 +163,6 @@ class FaceDetectionCropTestCase(unittest.TestCase):
         ]
 
         config = self._build_config()
-        self.assertEqual(config.align_canvas_size, (320, 320))
 
         detector = StubDetector({10: _face_result(), 30: _face_result(), 40: {}})
         pipeline = fd.FaceDetectionPipeline(
@@ -177,20 +175,43 @@ class FaceDetectionCropTestCase(unittest.TestCase):
 
         self.assertEqual(stats.written_samples, 3)
         payload = json.loads(sink.records[0]["json"].decode("utf-8"))
-        self.assertEqual(payload["alignment_mode"], "similarity_5pts_then_bbox_crop")
-        self.assertEqual(payload["crop_source"], "aligned_bbox_1.3x")
+        self.assertEqual(payload["alignment_mode"], "none_bbox_crop")
+        self.assertEqual(payload["crop_source"], "original_bbox")
         self.assertEqual(payload["crop_status"], "ok")
         self.assertTrue(payload["crop_x2"] > payload["crop_x1"])
         self.assertTrue(payload["crop_y2"] > payload["crop_y1"])
         self.assertEqual(payload["aligned_size"], [112, 112])
-        self.assertEqual(payload["align_canvas_width"], 320)
-        self.assertEqual(payload["align_canvas_height"], 320)
-        self.assertEqual(payload["align_canvas_size"], [320, 320])
-        self.assertGreater(payload["align_canvas_width"], payload["aligned_width"])
-        self.assertGreater(payload["align_canvas_height"], payload["aligned_height"])
-        self.assertLessEqual(payload["crop_x2"], payload["align_canvas_width"])
-        self.assertLessEqual(payload["crop_y2"], payload["align_canvas_height"])
+        self.assertNotIn("affine_matrix", payload)
+        self.assertNotIn("align_canvas_size", payload)
+        self.assertLessEqual(payload["crop_x2"], 96)
+        self.assertLessEqual(payload["crop_y2"], 96)
         self.assertEqual(detector.calls, [10, 30, 40])
+
+    def test_process_video_does_not_require_landmarks(self) -> None:
+        row = {
+            "frame_path": self._write_frame("original/video1/video1_frame_00000.jpg", 10),
+            "video_id": "video1",
+            "video_name": "video1",
+            "category": "original",
+            "label": "real",
+            "binary_label": "0",
+            "frame_number": "0",
+        }
+        face = _face_result()
+        face["face_1"]["landmarks"] = None
+        pipeline = fd.FaceDetectionPipeline(
+            config=self._build_config(),
+            detector_module=StubDetector({10: face}),
+            shard_writer_cls=FakeShardWriter,
+        )
+        sink = FakeShardWriter("unused", 1000, 1000, 0)
+
+        stats = pipeline._process_video(sink=sink, video_id="original/video1", indexed_rows=[(0, row)])
+
+        self.assertEqual(stats.written_samples, 1)
+        payload = json.loads(sink.records[0]["json"].decode("utf-8"))
+        self.assertIsNone(payload["landmarks"])
+        self.assertEqual(payload["alignment_mode"], "none_bbox_crop")
 
 
 if __name__ == "__main__":

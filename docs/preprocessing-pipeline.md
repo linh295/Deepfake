@@ -158,7 +158,7 @@ Tham so quan trong:
 - `--image-format`: `.jpg`, `.jpeg` hoac `.png`.
 - `--jpeg-quality`: quality neu ghi JPG.
 - `--shard-maxcount`, `--shard-maxsize`: nguong xoay shard.
-- `--skip-no-face`: giu semantic CLI cu; stage hien van chi ghi sample da align duoc.
+- `--skip-no-face`: giu semantic CLI cu; stage hien van chi ghi sample detect/crop duoc khuon mat.
 - `--audit-csv`: audit CSV goc; khi co `--split`, file audit se duoc ghi vao thu muc split.
 
 Dau ra:
@@ -168,14 +168,14 @@ Dau ra:
 
 Moi sample shard gom:
 
-- `json`: metadata detection/alignment/crop
-- `jpg` hoac `png`: anh mat da can chinh
+- `json`: metadata detection/crop
+- `jpg` hoac `png`: anh mat crop truc tiep tu bbox, khong landmark alignment
 - `cls`: label neu hop le
 
 Luu y van hanh:
 
 - Output duoc resume bang audit va scan shard da co.
-- Frame khong doc duoc hoac khong align duoc se khong tao sample.
+- Frame khong doc duoc, khong detect duoc mat hoac crop loi se khong tao sample.
 - `build_clips.py` yeu cau frame shard giu thu tu contiguous theo video.
 
 ## 4. Tao Clip Shard
@@ -210,7 +210,7 @@ Tham so:
 - `--split`: neu bo trong, script tu tim `train/val/test`.
 - `--clip-len`: so frame moi clip, mac dinh `8`.
 - `--frame-stride`: buoc frame trong clip, mac dinh `1`.
-- `--clip-stride`: sliding-window stride, mac dinh `4`.
+- `--clip-stride`: sliding-window stride, mac dinh `6`.
 - `--shard-maxcount`: so clip toi da moi shard.
 - `--shard-maxsize`: kich thuoc toi da moi shard.
 - `--overwrite`: xoa output split va build lai.

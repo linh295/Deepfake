@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
 
 from dataloader.dataset import ClipDatasetConfig, build_clip_dataloader
 from training.spatio_temporal_detector import ModelConfig, SpatioTemporalDeepfakeDetector
@@ -14,6 +15,45 @@ from training.utils.losses import BinaryFocalLossWithLogits
 
 if TYPE_CHECKING:
     from training.train import TrainConfig
+
+
+def linear_warmup_factor(epoch: int, warmup_epochs: int) -> float:
+    if warmup_epochs <= 0:
+        return 1.0
+    return min(1.0, float(epoch + 1) / float(warmup_epochs))
+
+
+@dataclass
+class TrainingSchedulers:
+    plateau_scheduler: ReduceLROnPlateau
+    warmup_scheduler: LambdaLR | None
+    warmup_epochs: int
+
+    def step(self, metric: float, epoch: int) -> str:
+        if self.warmup_scheduler is not None and epoch <= self.warmup_epochs:
+            if epoch < self.warmup_epochs:
+                self.warmup_scheduler.step()
+            return "linear_warmup"
+
+        self.plateau_scheduler.step(metric)
+        return "plateau"
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "plateau_scheduler": self.plateau_scheduler.state_dict(),
+            "warmup_scheduler": self.warmup_scheduler.state_dict() if self.warmup_scheduler is not None else None,
+            "warmup_epochs": self.warmup_epochs,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if "plateau_scheduler" not in state_dict:
+            self.plateau_scheduler.load_state_dict(state_dict)
+            return
+
+        self.plateau_scheduler.load_state_dict(state_dict["plateau_scheduler"])
+        warmup_state = state_dict.get("warmup_scheduler")
+        if self.warmup_scheduler is not None and warmup_state is not None:
+            self.warmup_scheduler.load_state_dict(warmup_state)
 
 
 def build_dataloaders(cfg: "TrainConfig") -> tuple[Any, Any]:
@@ -73,8 +113,12 @@ def build_model_config(cfg: "TrainConfig") -> ModelConfig:
         temporal_pool=cfg.temporal_pool,
         use_spatial_attention=cfg.use_spatial_attention,
         use_texture_enhancement=cfg.use_texture_enhancement,
-        use_cross_branch_attention=cfg.use_cross_branch_attention,
         use_feature_delta=cfg.use_feature_delta,
+        spatial_only=cfg.spatial_only,
+        temporal_only=cfg.temporal_only,
+        fusion_mode=cfg.fusion_mode,
+        fusion_spatial_weight=cfg.fusion_spatial_weight,
+        learnable_fusion_weight=cfg.learnable_fusion_weight,
     )
 
 
@@ -117,22 +161,34 @@ def build_loss(
 
 
 def build_optimizer(model: SpatioTemporalDeepfakeDetector, cfg: "TrainConfig") -> AdamW:
-    return AdamW(
-        [
-            {"params": model.spatial_branch.parameters(), "lr": cfg.lr_spatial},
-            {"params": model.temporal_branch.parameters(), "lr": cfg.lr_temporal},
-            {"params": model.fusion_head.parameters(), "lr": cfg.lr_fusion},
-        ],
-        weight_decay=cfg.weight_decay,
-    )
+    parameter_groups = []
+    if not model.config.temporal_only:
+        parameter_groups.append({"params": model.spatial_branch.parameters(), "lr": cfg.lr_spatial})
+    if not model.config.spatial_only:
+        parameter_groups.append({"params": model.temporal_branch.parameters(), "lr": cfg.lr_temporal})
+    parameter_groups.append({"params": model.fusion_head.parameters(), "lr": cfg.lr_fusion})
+    return AdamW(parameter_groups, weight_decay=cfg.weight_decay)
 
 
-def build_scheduler(optimizer: AdamW, cfg: "TrainConfig") -> ReduceLROnPlateau:
-    return ReduceLROnPlateau(
+def build_scheduler(optimizer: AdamW, cfg: "TrainConfig") -> TrainingSchedulers:
+    warmup_epochs = max(0, int(cfg.warmup_epochs))
+    warmup_scheduler = None
+    if warmup_epochs > 0:
+        warmup_scheduler = LambdaLR(
+            optimizer,
+            lr_lambda=lambda epoch: linear_warmup_factor(epoch, warmup_epochs),
+        )
+
+    plateau_scheduler = ReduceLROnPlateau(
         optimizer,
         mode="max",
         factor=cfg.scheduler_factor,
         patience=cfg.scheduler_patience,
         threshold=cfg.scheduler_threshold,
         min_lr=cfg.scheduler_min_lr,
+    )
+    return TrainingSchedulers(
+        plateau_scheduler=plateau_scheduler,
+        warmup_scheduler=warmup_scheduler,
+        warmup_epochs=warmup_epochs,
     )

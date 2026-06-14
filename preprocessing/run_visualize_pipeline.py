@@ -129,13 +129,13 @@ def parse_args() -> argparse.Namespace:
         help="RetinaFace confidence threshold",
     )
     parser.add_argument("--max-side", type=int, default=640, help="Max side length before detection")
-    parser.add_argument("--aligned-width", type=int, default=224, help="Aligned face output width")
-    parser.add_argument("--aligned-height", type=int, default=224, help="Aligned face output height")
+    parser.add_argument("--aligned-width", type=int, default=224, help="Face crop output width")
+    parser.add_argument("--aligned-height", type=int, default=224, help="Face crop output height")
     parser.add_argument(
         "--crop-scale",
         type=float,
         default=1.3,
-        help="Crop scale used by face detection alignment",
+        help="Crop scale used around the detected face bbox",
     )
     parser.add_argument(
         "--detect-every-k",

@@ -166,7 +166,10 @@ class FaceDetectionSplitTestCase(unittest.TestCase):
             pipeline._effective_audit_csv(),
             self.audit_csv.parent / "train" / self.audit_csv.name,
         )
-        self.assertTrue(FakeShardWriter.instances[-1].pattern.endswith("crop_data\\train\\shard-%06d.tar"))
+        self.assertEqual(
+            Path(FakeShardWriter.instances[-1].pattern),
+            self.output_dir / "train" / "shard-%06d.tar",
+        )
         self.assertEqual(
             [sample["__key__"] for sample in FakeShardWriter.instances[-1].records],
             ["original/video3/video3_frame_00000"],

@@ -60,7 +60,6 @@ def build_model_config(args: argparse.Namespace, checkpoint: object | None) -> M
         temporal_pool=args.temporal_pool,
         use_spatial_attention=not args.disable_spatial_attention,
         use_texture_enhancement=not args.disable_texture_enhancement,
-        use_cross_branch_attention=not args.disable_cross_branch_attention,
         use_feature_delta=args.use_feature_delta,
     )
 
@@ -122,7 +121,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--freeze-spatial-backbone", action="store_true")
     parser.add_argument("--disable-spatial-attention", action="store_true")
     parser.add_argument("--disable-texture-enhancement", action="store_true")
-    parser.add_argument("--disable-cross-branch-attention", action="store_true")
     parser.add_argument("--use-feature-delta", action="store_true")
     return parser.parse_args()
 

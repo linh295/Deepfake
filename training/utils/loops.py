@@ -7,11 +7,13 @@ import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from tqdm import tqdm
+import numpy as np
 
 from training.spatio_temporal_detector import SpatioTemporalDeepfakeDetector
 from training.utils.metrics import (
     ValidationDiagnostics,
     build_validation_diagnostics,
+    compute_binary_metrics,
     finalize_epoch_metrics,
     move_batch_to_device,
 )
@@ -24,6 +26,32 @@ _TQDM_BAR_FORMAT = (
     "{l_bar}{bar}| {n_fmt}/{total_fmt} "
     "[{elapsed}<{remaining}, {rate_fmt}{postfix}]"
 )
+
+
+def _forward_training_loss(
+    model: SpatioTemporalDeepfakeDetector,
+    spatial: torch.Tensor,
+    temporal: torch.Tensor,
+    labels: torch.Tensor,
+    criterion: nn.Module,
+    branch_aux_loss_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+    if branch_aux_loss_weight <= 0.0:
+        logits = model(spatial, temporal)
+        loss = criterion(logits, labels)
+        return logits, loss, {"fused_loss": float(loss.detach())}
+
+    logits, features = model(spatial, temporal, return_features=True)
+    spatial_loss = criterion(features["spatial_logit"].squeeze(1), labels)
+    temporal_loss = criterion(features["temporal_logit"].squeeze(1), labels)
+    fused_loss = criterion(logits, labels)
+    auxiliary_loss = 0.5 * (spatial_loss + temporal_loss)
+    loss = fused_loss + branch_aux_loss_weight * auxiliary_loss
+    return logits, loss, {
+        "fused_loss": float(fused_loss.detach()),
+        "spatial_aux_loss": float(spatial_loss.detach()),
+        "temporal_aux_loss": float(temporal_loss.detach()),
+    }
 
 
 def train_one_epoch(
@@ -43,6 +71,7 @@ def train_one_epoch(
     num_steps = 0
     all_probs: list[torch.Tensor] = []
     all_labels: list[torch.Tensor] = []
+    component_loss_sums: dict[str, float] = {}
 
     pbar = tqdm(
         loader,
@@ -56,8 +85,14 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with autocast(device_type=device.type, enabled=cfg.use_amp and device.type == "cuda"):
-            logits = model(batch["spatial"], batch["temporal"])
-            loss = criterion(logits, batch["label"])
+            logits, loss, component_losses = _forward_training_loss(
+                model=model,
+                spatial=batch["spatial"],
+                temporal=batch["temporal"],
+                labels=batch["label"],
+                criterion=criterion,
+                branch_aux_loss_weight=float(getattr(cfg, "branch_aux_loss_weight", 0.0)),
+            )
 
         scaler.scale(loss).backward()
         if cfg.grad_clip_norm > 0:
@@ -71,6 +106,8 @@ def train_one_epoch(
         num_steps += 1
         all_probs.append(probs.cpu())
         all_labels.append(batch["label"].detach().cpu())
+        for name, value in component_losses.items():
+            component_loss_sums[name] = component_loss_sums.get(name, 0.0) + value
 
         if step % cfg.log_every == 0 or step == 1:
             pbar.set_postfix(
@@ -78,13 +115,15 @@ def train_one_epoch(
                 lr=f"{optimizer.param_groups[0]['lr']:.2e}",
             )
 
-    return finalize_epoch_metrics(
+    metrics = finalize_epoch_metrics(
         running_loss=running_loss,
         num_steps=num_steps,
         all_probs=all_probs,
         all_labels=all_labels,
         stage_name="training",
     )
+    metrics.update({name: value / num_steps for name, value in component_loss_sums.items()})
+    return metrics
 
 
 @torch.no_grad()
@@ -103,6 +142,8 @@ def validate_one_epoch(
     num_steps = 0
     all_probs: list[torch.Tensor] = []
     all_labels: list[torch.Tensor] = []
+    all_spatial_probs: list[torch.Tensor] = []
+    all_temporal_probs: list[torch.Tensor] = []
 
     pbar = tqdm(
         loader,
@@ -114,7 +155,12 @@ def validate_one_epoch(
     for batch in pbar:
         batch = move_batch_to_device(batch, device)
         with autocast(device_type=device.type, enabled=cfg.use_amp and device.type == "cuda"):
-            logits = model(batch["spatial"], batch["temporal"])
+            if getattr(getattr(model, "config", None), "fusion_mode", "concat") == "weighted_prob":
+                logits, features = model(batch["spatial"], batch["temporal"], return_features=True)
+                all_spatial_probs.append(features["spatial_prob"].detach().cpu())
+                all_temporal_probs.append(features["temporal_prob"].detach().cpu())
+            else:
+                logits = model(batch["spatial"], batch["temporal"])
             loss = criterion(logits, batch["label"])
 
         probs = torch.sigmoid(logits)
@@ -130,6 +176,22 @@ def validate_one_epoch(
         all_labels=all_labels,
         stage_name="validation",
     )
+    if all_spatial_probs and all_temporal_probs:
+        labels_np = torch.cat(all_labels).numpy().astype(np.int64).reshape(-1)
+        spatial_probs_np = torch.cat(all_spatial_probs).numpy().astype(np.float32).reshape(-1)
+        temporal_probs_np = torch.cat(all_temporal_probs).numpy().astype(np.float32).reshape(-1)
+        metrics.update(
+            {
+                f"spatial_{name}": value
+                for name, value in compute_binary_metrics(labels_np, spatial_probs_np).items()
+            }
+        )
+        metrics.update(
+            {
+                f"temporal_{name}": value
+                for name, value in compute_binary_metrics(labels_np, temporal_probs_np).items()
+            }
+        )
     diagnostics = build_validation_diagnostics(
         all_probs=all_probs,
         all_labels=all_labels,

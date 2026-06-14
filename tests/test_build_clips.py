@@ -96,6 +96,26 @@ class BuildClipsTestCase(unittest.TestCase):
                     info.size = len(data)
                     archive.addfile(info, io.BytesIO(data))
 
+    def _frames_from_markers(self, markers: list[int]) -> list[bc.FrameSample]:
+        return [
+            bc.FrameSample(
+                key=f"original/124/124_frame_{index:05d}",
+                split="train",
+                category="original",
+                video_id="original/124",
+                video_name="124",
+                frame_number=index,
+                original_frame_index=index,
+                timestamp=float(index),
+                binary_label=0,
+                extraction_fps=5.0,
+                video_fps=5.0,
+                image_rgb=np.full((24, 24, 3), marker, dtype=np.uint8),
+                metadata={},
+            )
+            for index, marker in enumerate(markers)
+        ]
+
     def test_build_clips_uses_canonical_video_id_for_group_and_key(self) -> None:
         samples = [
             self._sample(key=f"original/124/124_frame_{idx:05d}", video_id="original/124", video_name="124", frame_number=idx, marker=10 + idx)
@@ -217,6 +237,24 @@ class BuildClipsTestCase(unittest.TestCase):
         ]
         clips = bc.build_clips_for_video(frames, clip_len=4, frame_stride=1, clip_stride=1)
         self.assertEqual(clips, [])
+
+    def test_uniform_sampling_preserves_all_candidates_and_clip_start(self) -> None:
+        frames = self._frames_from_markers([0, 10, 20, 30, 40, 50])
+
+        clips = bc.build_clips_for_video(
+            frames,
+            clip_len=3,
+            frame_stride=1,
+            clip_stride=2,
+        )
+
+        self.assertEqual(len(clips), 2)
+        self.assertEqual([clip["__key__"] for clip in clips], [
+            "original/124/clip_000000",
+            "original/124/clip_000001",
+        ])
+        metadata = [json.loads(clip["json"].decode("utf-8")) for clip in clips]
+        self.assertEqual([meta["clip_start"] for meta in metadata], [0, 2])
 
     def test_process_split_fails_if_output_has_existing_shards_without_overwrite(self) -> None:
         samples = [

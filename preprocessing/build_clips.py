@@ -231,11 +231,9 @@ def build_clips_for_video(
 
     samples: List[Dict[str, Any]] = []
     clip_id = 0
-
     for start in range(0, len(frames) - needed + 1, clip_stride):
         idxs = [start + i * frame_stride for i in range(clip_len)]
         clip_frames = [frames[i] for i in idxs]
-
         if not _frame_continuity_ok(clip_frames, frame_stride=frame_stride):
             continue
 
@@ -262,6 +260,7 @@ def build_clips_for_video(
             "clip_length": clip_len,
             "frame_stride": frame_stride,
             "clip_stride": clip_stride,
+            "clip_start": start,
             "num_differences": clip_len - 1,
             "frame_numbers": [f.frame_number for f in clip_frames],
             "original_frame_indices": [f.original_frame_index for f in clip_frames],
@@ -430,13 +429,13 @@ def discover_splits(input_dir: Path, split: Optional[str]) -> List[Tuple[str, Pa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build clip-level WebDataset shards (8-frame clips + frame differences) from aligned frame shards"
+        description="Build clip-level WebDataset shards (8-frame clips + frame differences) from face-crop shards"
     )
     parser.add_argument(
         "--input-dir",
         type=str,
         default=str(settings.CROP_DATA_DIR),
-        help="Root directory containing aligned frame shards, typically split subdirectories train/val/test",
+        help="Root directory containing face-crop shards, typically split subdirectories train/val/test",
     )
     parser.add_argument(
         "--output-dir",
@@ -457,7 +456,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-maxcount", type=int, default=2000, help="Maximum clips per output shard")
     parser.add_argument("--shard-maxsize", type=int, default=2_000_000_000, help="Maximum bytes per output shard")
     parser.add_argument("--overwrite", action="store_true", help="Delete existing output shards for the target split before rebuilding")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.clip_len < 2:
+        parser.error("--clip-len must be at least 2")
+    if args.frame_stride < 1:
+        parser.error("--frame-stride must be at least 1")
+    if args.clip_stride < 1:
+        parser.error("--clip-stride must be at least 1")
+    return args
 
 
 def main() -> None:

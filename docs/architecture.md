@@ -38,7 +38,7 @@ Video goc
 - [analyze_videos_master.py](../preprocessing/analyze_videos_master.py): in bao cao phan bo split theo category.
 - [frame_extractor.py](../preprocessing/frame_extractor.py): trich xuat frame, ghi metadata/audit va ho tro resume.
 - [face_detection.py](../preprocessing/face_detection.py): CLI wrapper cho face pipeline.
-- [_face_detection_pipeline.py](../preprocessing/_face_detection_pipeline.py): RetinaFace detection, keyframe interpolation, alignment, crop, shard writer va audit.
+- [_face_detection_pipeline.py](../preprocessing/_face_detection_pipeline.py): RetinaFace detection, keyframe bbox interpolation, crop, shard writer va audit.
 - [build_clips.py](../preprocessing/build_clips.py): gom frame shard thanh clip shard.
 - [count_clips.py](../preprocessing/count_clips.py): dem so shard/clip trong `clip_data`.
 
@@ -63,7 +63,7 @@ Batch output gom:
 - [spatial_resnet50.py](../training/spatial_resnet50.py): spatial branch ResNet50.
 - [temporal_diff_cnn.py](../training/temporal_diff_cnn.py): temporal branch tren frame difference, ho tro `mean`, `attention`, `gru`.
 - [fusion_head.py](../training/fusion_head.py): MLP fusion classifier.
-- `training/utils/`: builder, train/val loop, metric, checkpoint, class balance, freezing, figure va runtime helper.
+- `training/utils/`: builder, train/val loop, metric, checkpoint, class balance, figure va runtime helper.
 
 ## Label Va Split
 
@@ -106,9 +106,8 @@ Face pipeline:
 - detect bang RetinaFace voi nguong mac dinh `0.9`
 - chon khuon mat chinh dua tren kich thuoc va lien tuc voi bbox truoc
 - detect tren keyframe theo `detect_every_k`
-- noi suy bbox/landmark giua keyframe co detection hop le
-- can chinh bang 5 landmark len align canvas
-- crop vuong quanh bbox da can chinh theo `crop_scale`
+- noi suy bbox giua keyframe co detection hop le
+- crop vuong truc tiep quanh bbox tren frame goc theo `crop_scale`, khong landmark alignment
 - resize ve `aligned_width x aligned_height`, mac dinh `224 x 224`
 - ghi sample WebDataset gom `json`, anh `jpg/png`, va `cls` neu co label
 
@@ -122,7 +121,7 @@ Mac dinh:
 
 - `clip_len = 8`
 - `frame_stride = 1`
-- `clip_stride = 4`
+- `clip_stride = 6`
 - `rgb.npy`: `(T, C, H, W)` uint8
 - `diff.npy`: absolute difference giua frame lien tiep, `(T-1, C, H, W)` uint8
 
@@ -145,7 +144,7 @@ Temporal branch:
 
 - input shape `[B, T-1, 3, H, W]`
 - encode tung frame-difference bang CNN residual nhe
-- neu `use_cross_branch_attention=True`, spatial attention map `[B, 1, Hs, Ws]` duoc resize va nhan vao temporal feature map cua tung frame truoc global average pooling
+- temporal branch hoat dong doc lap voi spatial branch cho den FusionHead
 - project moi timestep ve `temporal_feature_dim`, CLI train mac dinh `256`
 - neu `use_feature_delta=True`, concat `|x_t - x_{t-1}|` vao feature tung timestep truoc GRU
 - pooling co the la `mean`, `attention`, hoac `gru`
@@ -170,7 +169,7 @@ Training loop:
 - auto `pos_weight` tu train shard neu bat
 - AMP tren CUDA theo mac dinh
 - gradient clipping
-- alternate freezing: freeze spatial trong `spatial_freeze_warmup_epochs` dau, freeze temporal trong `temporal_freeze_epochs` tiep theo, sau do train full model
+- spatial, temporal va fusion branch duoc train dong thoi tu epoch dau
 - `ReduceLROnPlateau(mode="max")` theo selection metric
 - early stopping theo selection metric
 

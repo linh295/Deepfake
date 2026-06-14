@@ -44,17 +44,6 @@ if os.environ.get("DEEPFAKE_TEST_WORKSPACE_TEMP"):
     tempfile.TemporaryDirectory = _WorkspaceTemporaryDirectory  # type: ignore[assignment]
 
 
-ARCFACE_112_TEMPLATE = np.array(
-    [
-        [38.2946, 51.6963],
-        [73.5318, 51.5014],
-        [56.0252, 71.7366],
-        [41.5493, 92.3655],
-        [70.7299, 92.2041],
-    ],
-    dtype=np.float32,
-)
-
 _REQUIRED_LANDMARK_KEYS = ["left_eye", "right_eye", "nose", "mouth_left", "mouth_right"]
 _REQUIRED_METADATA_FIELDS = {"frame_path"}
 _VALID_SPLITS = {"train", "val", "test"}
@@ -72,6 +61,7 @@ class DetectionRecord:
     bbox: Optional[List[int]] = None
     landmarks: Optional[Dict[str, List[float]]] = None
     source: str = ""
+    error_message: str = ""
 
 
 @dataclass
@@ -93,17 +83,7 @@ class FaceDetectionConfig:
     audit_csv: Optional[Path]
     detect_every_k: int
     retinaface_cache_dir: Path
-    align_canvas_size: Tuple[int, int] = (0, 0)
     split: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        requested_w, requested_h = self.align_canvas_size
-        if requested_w <= 0 or requested_h <= 0:
-            self.align_canvas_size = _infer_align_canvas_size(self.aligned_size)
-            return
-
-        side = int(max(requested_w, requested_h, self.aligned_size[0], self.aligned_size[1]))
-        self.align_canvas_size = (side, side)
 
 
 @dataclass
@@ -115,8 +95,7 @@ class VideoProcessingStats:
     read_fail: int = 0
     detect_error: int = 0
     no_face: int = 0
-    missing_landmarks: int = 0
-    align_fail: int = 0
+    crop_fail: int = 0
     encode_fail: int = 0
     written_samples: int = 0
     skipped_no_face: int = 0
@@ -138,8 +117,7 @@ class PipelineStats:
     read_fail: int = 0
     detect_error: int = 0
     no_face: int = 0
-    missing_landmarks: int = 0
-    align_fail: int = 0
+    crop_fail: int = 0
     encode_fail: int = 0
     written_samples: int = 0
     skipped_no_face: int = 0
@@ -369,15 +347,20 @@ def detect_main_face_on_array(
     if detector is None:
         try:
             detector = _load_retinaface_module(Path(settings.RETINAFACE_WEIGHT_DIR))
-        except RuntimeError:
-            return DetectionRecord(status="detect_error")
+        except RuntimeError as exc:
+            return DetectionRecord(
+                status="detect_error",
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
 
     resized, scale = _resize_for_detection(image, max_side=max_side)
     try:
         result = detector.detect_faces(resized, threshold=threshold)
     except Exception as exc:
-        logger.debug("Detection failed on in-memory image: {}", exc)
-        return DetectionRecord(status="detect_error")
+        return DetectionRecord(
+            status="detect_error",
+            error_message=f"{type(exc).__name__}: {exc}",
+        )
 
     faces = _extract_all_faces(result)
     if not faces:
@@ -414,89 +397,6 @@ def detect_main_face_on_array(
         landmarks=landmarks,
         source="detected",
     )
-
-
-def _retinaface_landmarks_to_template_order(
-    landmarks: Optional[Dict[str, List[float]]],
-) -> Optional[np.ndarray]:
-    if landmarks is None:
-        return None
-
-    points: List[List[float]] = []
-    for key in _REQUIRED_LANDMARK_KEYS:
-        if key not in landmarks:
-            return None
-        value = landmarks[key]
-        if not isinstance(value, (list, tuple)) or len(value) != 2:
-            return None
-        points.append([float(value[0]), float(value[1])])
-    return np.array(points, dtype=np.float32)
-
-
-def _scaled_destination_template(output_size: Tuple[int, int]) -> np.ndarray:
-    out_w, out_h = output_size
-    dst = ARCFACE_112_TEMPLATE.copy()
-    dst[:, 0] *= out_w / 112.0
-    dst[:, 1] *= out_h / 112.0
-    return dst.astype(np.float32)
-
-
-def _infer_align_canvas_size(aligned_size: Tuple[int, int]) -> Tuple[int, int]:
-    canvas_side = int(np.ceil(max(float(max(aligned_size)) * 1.5, 320.0)))
-    return canvas_side, canvas_side
-
-
-def align_image_5pts(
-    image: np.ndarray,
-    landmarks: Optional[Dict[str, List[float]]],
-    output_size: Tuple[int, int],
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
-    src = _retinaface_landmarks_to_template_order(landmarks)
-    if src is None:
-        return None, None, "missing_landmarks"
-
-    dst = _scaled_destination_template(output_size=output_size)
-    matrix, _ = cv2.estimateAffinePartial2D(src, dst, method=cv2.LMEDS)
-    if matrix is None:
-        return None, None, "align_fail"
-
-    out_w, out_h = output_size
-    aligned = cv2.warpAffine(
-        image,
-        matrix,
-        (out_w, out_h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REFLECT101,
-    )
-    return aligned, matrix, "ok"
-
-
-def _transform_bbox_with_affine(
-    bbox: Optional[List[int]],
-    affine_matrix: Optional[np.ndarray],
-) -> Optional[List[float]]:
-    if bbox is None or affine_matrix is None:
-        return None
-
-    x1, y1, x2, y2 = [float(v) for v in bbox]
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    corners = np.array(
-        [
-            [x1, y1],
-            [x2, y1],
-            [x2, y2],
-            [x1, y2],
-        ],
-        dtype=np.float32,
-    )
-    transformed = cv2.transform(corners[None, :, :], affine_matrix)[0]
-    min_xy = transformed.min(axis=0)
-    max_xy = transformed.max(axis=0)
-    if max_xy[0] <= min_xy[0] or max_xy[1] <= min_xy[1]:
-        return None
-    return [float(min_xy[0]), float(min_xy[1]), float(max_xy[0]), float(max_xy[1])]
 
 
 def _build_square_crop_box(
@@ -545,22 +445,22 @@ def _build_square_crop_box(
     return crop_box
 
 
-def crop_aligned_face_from_bbox(
-    aligned_image: np.ndarray,
-    aligned_bbox: Optional[List[float]],
+def crop_face_from_bbox(
+    image: np.ndarray,
+    bbox: Optional[List[float]],
     crop_scale: float,
     output_size: Tuple[int, int],
 ) -> Tuple[Optional[np.ndarray], Optional[List[int]], str]:
     crop_box = _build_square_crop_box(
-        bbox=aligned_bbox,
-        image_size=aligned_image.shape[:2],
+        bbox=bbox,
+        image_size=image.shape[:2],
         crop_scale=crop_scale,
     )
     if crop_box is None:
         return None, None, "crop_fail"
 
     x1, y1, x2, y2 = crop_box
-    cropped = aligned_image[y1:y2, x1:x2]
+    cropped = image[y1:y2, x1:x2]
     if cropped.size == 0:
         return None, None, "crop_fail"
 
@@ -583,7 +483,7 @@ def encode_image_to_bytes(image: np.ndarray, image_format: str, jpeg_quality: in
 
     ok, buffer = cv2.imencode(ext, image, params)
     if not ok:
-        raise RuntimeError("Failed to encode aligned image")
+        raise RuntimeError("Failed to encode cropped face image")
     return buffer.tobytes()
 
 
@@ -736,18 +636,18 @@ def _build_interpolated_detections(
         end_rec = keyframe_detections[end_idx]
         if start_rec.bbox is None or end_rec.bbox is None:
             continue
-        if start_rec.landmarks is None or end_rec.landmarks is None:
-            continue
-
         gap = end_idx - start_idx
         for mid in range(start_idx + 1, end_idx):
             t = (mid - start_idx) / float(gap)
+            landmarks = None
+            if start_rec.landmarks is not None and end_rec.landmarks is not None:
+                landmarks = _interpolate_landmarks(start_rec.landmarks, end_rec.landmarks, t)
             interpolated[mid] = DetectionRecord(
                 status="ok",
                 num_faces=max(start_rec.num_faces, end_rec.num_faces),
                 confidence=round(min(start_rec.confidence, end_rec.confidence), 6),
                 bbox=_interpolate_bbox(start_rec.bbox, end_rec.bbox, t),
-                landmarks=_interpolate_landmarks(start_rec.landmarks, end_rec.landmarks, t),
+                landmarks=landmarks,
                 source="interpolated",
             )
     return interpolated
@@ -765,6 +665,19 @@ class FaceDetectionPipeline:
         self.shard_writer_cls = shard_writer_cls
         self.processed_keys: Set[str] = set()
         self._warned_skip_no_face_semantics = False
+        self._detection_error_counts: Dict[str, int] = {}
+        self._detection_error_log_limit = 5
+
+    def _report_detection_error(self, record: DetectionRecord, image_path: Path) -> None:
+        message = record.error_message or "Unknown RetinaFace detection error"
+        count = self._detection_error_counts.get(message, 0) + 1
+        self._detection_error_counts[message] = count
+
+        total_error_types_logged = sum(
+            1 for error_count in self._detection_error_counts.values() if error_count > 0
+        )
+        if count == 1 and total_error_types_logged <= self._detection_error_log_limit:
+            logger.error("RetinaFace detection failed on {} | {}", image_path, message)
 
     def _ensure_detector_module(self) -> Any:
         if self.detector_module is None:
@@ -776,7 +689,7 @@ class FaceDetectionPipeline:
             return
         logger.warning(
             "--skip-no-face=false does not emit no-face frames. "
-            "This stage still writes only aligned face samples to shards."
+            "This stage still writes only detected face crops to shards."
         )
         self._warned_skip_no_face_semantics = True
 
@@ -882,6 +795,7 @@ class FaceDetectionPipeline:
                 stats["keyframe_no_face"] += 1
             else:
                 stats["keyframe_detect_error"] += 1
+                self._report_detection_error(record, image_path)
             keyframe_detections[idx] = record
 
         return keyframe_detections, stats
@@ -892,7 +806,6 @@ class FaceDetectionPipeline:
         row: Dict[str, str],
         record: DetectionRecord,
         cropped_img: np.ndarray,
-        affine_matrix: np.ndarray,
         crop_box: List[int],
     ) -> Dict[str, Any]:
         out_h, out_w = cropped_img.shape[:2]
@@ -925,26 +838,18 @@ class FaceDetectionPipeline:
             "bbox_y2": int(record.bbox[3]) if record.bbox is not None else 0,
             "bbox_source": record.source,
             "landmarks": record.landmarks,
-            "alignment_mode": "similarity_5pts_then_bbox_crop",
+            "alignment_mode": "none_bbox_crop",
             "crop_scale": self.config.crop_scale,
-            "align_status": "ok",
             "crop_status": "ok",
             "crop_x1": int(crop_box[0]),
             "crop_y1": int(crop_box[1]),
             "crop_x2": int(crop_box[2]),
             "crop_y2": int(crop_box[3]),
             "crop_size": int(max(crop_width, crop_height)),
-            "crop_source": "aligned_bbox_1.3x",
+            "crop_source": "original_bbox",
             "aligned_width": int(out_w),
             "aligned_height": int(out_h),
             "aligned_size": [int(self.config.aligned_size[0]), int(self.config.aligned_size[1])],
-            "align_canvas_width": int(self.config.align_canvas_size[0]),
-            "align_canvas_height": int(self.config.align_canvas_size[1]),
-            "align_canvas_size": [
-                int(self.config.align_canvas_size[0]),
-                int(self.config.align_canvas_size[1]),
-            ],
-            "affine_matrix": affine_matrix.tolist(),
             "image_format": self.config.image_format,
             "detect_every_k": int(self.config.detect_every_k),
         }
@@ -1041,6 +946,7 @@ class FaceDetectionPipeline:
                     continue
                 if record.status == "detect_error":
                     stats.detect_error += 1
+                    self._report_detection_error(record, image_path)
                     progress.update(1)
                     continue
                 if record.status != "ok" or record.bbox is None:
@@ -1053,29 +959,14 @@ class FaceDetectionPipeline:
                 last_known_bbox = record.bbox
                 stats.detected_frames += 1
 
-                aligned_img, affine_matrix, align_status = align_image_5pts(
+                cropped_img, crop_box, crop_status = crop_face_from_bbox(
                     image=image,
-                    landmarks=record.landmarks,
-                    output_size=self.config.align_canvas_size,
-                )
-                if align_status == "missing_landmarks":
-                    stats.missing_landmarks += 1
-                    progress.update(1)
-                    continue
-                if align_status != "ok" or aligned_img is None or affine_matrix is None:
-                    stats.align_fail += 1
-                    progress.update(1)
-                    continue
-
-                aligned_bbox = _transform_bbox_with_affine(record.bbox, affine_matrix)
-                cropped_img, crop_box, crop_status = crop_aligned_face_from_bbox(
-                    aligned_image=aligned_img,
-                    aligned_bbox=aligned_bbox,
+                    bbox=record.bbox,
                     crop_scale=self.config.crop_scale,
                     output_size=self.config.aligned_size,
                 )
                 if crop_status != "ok" or cropped_img is None or crop_box is None:
-                    stats.align_fail += 1
+                    stats.crop_fail += 1
                     progress.update(1)
                     continue
 
@@ -1085,7 +976,6 @@ class FaceDetectionPipeline:
                         row=row,
                         record=record,
                         cropped_img=cropped_img,
-                        affine_matrix=affine_matrix,
                         crop_box=crop_box,
                     )
                 except Exception as exc:
@@ -1122,8 +1012,8 @@ class FaceDetectionPipeline:
         logger.info("Effective output dir: {}", effective_output_dir)
         logger.info("Effective audit path: {}", effective_audit_csv if effective_audit_csv else "disabled")
         logger.info("max_side: {}", self.config.max_side)
-        logger.info("aligned_size: {}", self.config.aligned_size)
-        logger.info("align_canvas_size: {}", self.config.align_canvas_size)
+        logger.info("output_crop_size: {}", self.config.aligned_size)
+        logger.info("alignment_mode: none_bbox_crop")
         logger.info("crop_scale: {}", self.config.crop_scale)
         logger.info("detect_every_k: {}", self.config.detect_every_k)
         logger.info("image_format: {}", self.config.image_format)
@@ -1146,7 +1036,7 @@ class FaceDetectionPipeline:
                     total_stats.merge_video(stats)
 
                     logger.info(
-                        "Done video={} | rows={} | written={} | detected={} | interpolated={} | no_face={} | skipped_existing={} | missing_landmarks={} | align_fail={}",
+                        "Done video={} | rows={} | written={} | detected={} | interpolated={} | no_face={} | skipped_existing={} | crop_fail={}",
                         video_id,
                         stats.total_rows,
                         stats.written_samples,
@@ -1154,8 +1044,7 @@ class FaceDetectionPipeline:
                         stats.interpolated_frames,
                         stats.no_face,
                         stats.skipped_existing,
-                        stats.missing_landmarks,
-                        stats.align_fail,
+                        stats.crop_fail,
                     )
                     video_progress.update(1)
             finally:
@@ -1164,6 +1053,13 @@ class FaceDetectionPipeline:
         logger.info("=== FINAL SUMMARY ===")
         for key, value in total_stats.as_dict().items():
             logger.info("{}: {}", key, value)
+        if self._detection_error_counts:
+            logger.error("=== RETINAFACE ERROR SUMMARY ===")
+            for message, count in sorted(
+                self._detection_error_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[: self._detection_error_log_limit]:
+                logger.error("count={} | {}", count, message)
 
 
 def run_pipeline(
@@ -1188,8 +1084,6 @@ def run_pipeline(
     normalized_split = None if split is None else split.strip().lower()
     if normalized_split is not None and normalized_split not in _VALID_SPLITS:
         raise ValueError(f"Unsupported split: {split}")
-    align_canvas_size = _infer_align_canvas_size(aligned_size)
-
     config = FaceDetectionConfig(
         metadata_csv=metadata_csv,
         frame_root=frame_root,
@@ -1199,7 +1093,6 @@ def run_pipeline(
         threshold=threshold,
         max_side=max_side,
         aligned_size=aligned_size,
-        align_canvas_size=align_canvas_size,
         crop_scale=crop_scale,
         image_format=image_format,
         jpeg_quality=jpeg_quality,
@@ -1216,7 +1109,7 @@ def run_pipeline(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="RetinaFace detect + main-face selection + conservative 5pt alignment + WebDataset shards"
+        description="RetinaFace detect + main-face bbox crop + WebDataset shards"
     )
     parser.add_argument(
         "--metadata-csv",
@@ -1257,8 +1150,8 @@ def parse_args() -> argparse.Namespace:
         default=640,
         help="Resize image before detection so longest side <= max-side",
     )
-    parser.add_argument("--aligned-width", type=int, default=224, help="Final cropped face output width")
-    parser.add_argument("--aligned-height", type=int, default=224, help="Final cropped face output height")
+    parser.add_argument("--aligned-width", type=int, default=224, help="Final face crop output width")
+    parser.add_argument("--aligned-height", type=int, default=224, help="Final face crop output height")
     parser.add_argument(
         "--crop-scale",
         type=float,
@@ -1329,17 +1222,14 @@ __all__ = [
     "_build_square_crop_box",
     "_base_key_from_tar_member",
     "_group_rows_by_video",
-    "_infer_align_canvas_size",
     "_interpolate_bbox",
     "_interpolate_landmarks",
     "_make_keyframe_indices",
     "_sort_video_rows",
-    "_transform_bbox_with_affine",
-    "align_image_5pts",
     "append_audit_row",
     "build_audit_row",
     "build_sample_key",
-    "crop_aligned_face_from_bbox",
+    "crop_face_from_bbox",
     "detect_main_face_on_array",
     "encode_image_to_bytes",
     "infer_start_shard",

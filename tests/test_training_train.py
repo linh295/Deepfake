@@ -20,8 +20,8 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from training.spatio_temporal_detector import ModelConfig
-from training.train import TrainConfig, main
-from training.utils.builders import build_dataloaders, build_loss, build_model, build_scheduler
+from training.train import TrainConfig, apply_spatial_warmup_freeze, main
+from training.utils.builders import build_dataloaders, build_loss, build_model, build_scheduler, linear_warmup_factor
 from training.utils.checkpointing import load_checkpoint, save_checkpoint
 from training.utils.class_balance import ClassBalanceInfo, build_class_balance_info
 from training.utils.figures import render_training_figures, resolve_figure_output_dirs
@@ -73,6 +73,26 @@ class _TinyModel(nn.Module):
 
     def forward(self, spatial: torch.Tensor, temporal: torch.Tensor) -> torch.Tensor:
         return self.bias.expand(spatial.shape[0])
+
+
+class _TinyBranch(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.tensor(1.0))
+
+    def freeze(self) -> None:
+        for param in self.parameters():
+            param.requires_grad_(False)
+
+    def unfreeze(self) -> None:
+        for param in self.parameters():
+            param.requires_grad_(True)
+
+
+class _TinyDetector(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.spatial_branch = _TinyBranch()
 
 
 def _batch(batch_size: int = 2, temporal_frames: int = 7) -> dict[str, object]:
@@ -215,6 +235,17 @@ class TrainModuleTestCase(unittest.TestCase):
         criterion = build_loss(cfg, torch.device("cpu"), balance)
 
         self.assertIsNone(criterion.pos_weight)
+
+    def test_spatial_warmup_freezes_then_unfreezes_branch(self) -> None:
+        model = _TinyDetector()
+
+        phase = apply_spatial_warmup_freeze(model, epoch=1, warmup_epochs=2)
+        self.assertEqual(phase, "temporal_warmup_spatial_frozen")
+        self.assertTrue(all(not param.requires_grad for param in model.spatial_branch.parameters()))
+
+        phase = apply_spatial_warmup_freeze(model, epoch=3, warmup_epochs=2)
+        self.assertEqual(phase, "full_train")
+        self.assertTrue(all(param.requires_grad for param in model.spatial_branch.parameters()))
 
     def test_class_balance_counts_labels_and_inverts_effective_positive_class(self) -> None:
         train_dir = self.root / "clip_data" / "train"
@@ -402,12 +433,56 @@ class TrainModuleTestCase(unittest.TestCase):
 
         scheduler = build_scheduler(optimizer, cfg)
 
-        self.assertIsInstance(scheduler, ReduceLROnPlateau)
-        self.assertEqual(scheduler.mode, "max")
-        self.assertEqual(scheduler.factor, 0.5)
-        self.assertEqual(scheduler.patience, 3)
-        self.assertEqual(scheduler.threshold, 1e-3)
-        self.assertEqual(scheduler.min_lrs, [1e-6])
+        self.assertIsInstance(scheduler.plateau_scheduler, ReduceLROnPlateau)
+        self.assertIsNone(scheduler.warmup_scheduler)
+        self.assertEqual(scheduler.plateau_scheduler.mode, "max")
+        self.assertEqual(scheduler.plateau_scheduler.factor, 0.5)
+        self.assertEqual(scheduler.plateau_scheduler.patience, 3)
+        self.assertEqual(scheduler.plateau_scheduler.threshold, 1e-3)
+        self.assertEqual(scheduler.plateau_scheduler.min_lrs, [1e-6])
+
+    def test_lr_warmup_preserves_param_group_ratios_and_defers_plateau(self) -> None:
+        model = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 1), nn.Linear(1, 1))
+        optimizer = AdamW(
+            [
+                {"params": model[0].parameters(), "lr": 1e-5},
+                {"params": model[1].parameters(), "lr": 8e-5},
+                {"params": model[2].parameters(), "lr": 1e-4},
+            ]
+        )
+        cfg = TrainConfig(
+            train_shards="train",
+            val_shards="val",
+            warmup_epochs=3,
+            scheduler_factor=0.5,
+            scheduler_patience=0,
+        )
+
+        scheduler = build_scheduler(optimizer, cfg)
+
+        self.assertEqual([round(group["lr"], 10) for group in optimizer.param_groups], [round(1e-5 / 3, 10), round(8e-5 / 3, 10), round(1e-4 / 3, 10)])
+        optimizer.step()
+        self.assertEqual(scheduler.step(0.8, epoch=1), "linear_warmup")
+        self.assertEqual([round(group["lr"], 10) for group in optimizer.param_groups], [round(2e-5 / 3, 10), round(16e-5 / 3, 10), round(2e-4 / 3, 10)])
+        optimizer.step()
+        self.assertEqual(scheduler.step(0.8, epoch=2), "linear_warmup")
+        self.assertEqual([round(group["lr"], 10) for group in optimizer.param_groups], [1e-5, 8e-5, 1e-4])
+        optimizer.step()
+        self.assertEqual(scheduler.step(0.8, epoch=3), "linear_warmup")
+        self.assertEqual([round(group["lr"], 10) for group in optimizer.param_groups], [1e-5, 8e-5, 1e-4])
+
+        optimizer.step()
+        self.assertEqual(scheduler.step(0.7, epoch=4), "plateau")
+        self.assertEqual([round(group["lr"], 10) for group in optimizer.param_groups], [1e-5, 8e-5, 1e-4])
+        optimizer.step()
+        self.assertEqual(scheduler.step(0.6, epoch=5), "plateau")
+        self.assertEqual([round(group["lr"], 10) for group in optimizer.param_groups], [5e-6, 4e-5, 5e-5])
+
+    def test_linear_warmup_factor_examples(self) -> None:
+        self.assertEqual(linear_warmup_factor(0, 3), 1.0 / 3.0)
+        self.assertEqual(linear_warmup_factor(1, 3), 2.0 / 3.0)
+        self.assertEqual(linear_warmup_factor(2, 3), 1.0)
+        self.assertEqual(linear_warmup_factor(3, 3), 1.0)
 
     def test_set_seed_and_restore_rng_state_keep_random_stream_reproducible(self) -> None:
         set_seed(123)
@@ -573,7 +648,7 @@ class TrainModuleTestCase(unittest.TestCase):
             self.assertTrue((figure_dir / f"{stem}.png").exists())
             self.assertTrue((figure_dir / f"{stem}.svg").exists())
 
-    def test_main_logs_class_balance_and_uses_alternate_freezing_schedule(self) -> None:
+    def test_main_logs_class_balance_and_trains_all_epochs(self) -> None:
         model = nn.Linear(4, 1)
         optimizer = AdamW(model.parameters(), lr=1e-3)
         scheduler = mock.Mock()
@@ -585,7 +660,6 @@ class TrainModuleTestCase(unittest.TestCase):
             save_every=99,
             use_amp=False,
             early_stopping_patience=10,
-            spatial_freeze_warmup_epochs=3,
             invert_binary_labels=True,
         )
         model_cfg = ModelConfig(temporal_num_frames=7)
@@ -615,7 +689,6 @@ class TrainModuleTestCase(unittest.TestCase):
              mock.patch("training.train.build_scheduler", return_value=scheduler), \
              mock.patch("training.train.resolve_figure_output_dirs", return_value=mock.Mock(run_dir=self.root / "figures", latest_dir=self.root / "figures" / "latest", best_root_dir=self.root / "figures" / "best")) as resolve_figures_mock, \
              mock.patch("training.train.render_training_figures") as render_figures_mock, \
-             mock.patch("training.train.apply_training_phase") as freeze_mock, \
              mock.patch("training.train.train_one_epoch", return_value={"loss": 0.4, "auc": 0.7, "accuracy": 0.8, "f1": 0.75}) as train_epoch_mock, \
              mock.patch("training.train.validate_one_epoch", return_value=({"loss": 0.3, "auc": 0.8, "accuracy": 0.9, "f1": 0.85}, diagnostics)) as val_epoch_mock, \
              mock.patch("training.train.write_history") as write_history_mock, \
@@ -625,27 +698,9 @@ class TrainModuleTestCase(unittest.TestCase):
 
         self.assertEqual(resolve_figures_mock.call_count, 1)
         self.assertEqual(scheduler.step.call_count, 4)
-        self.assertEqual(freeze_mock.call_count, 4)
         self.assertEqual(render_figures_mock.call_count, 5)
         self.assertTrue(render_figures_mock.call_args_list[0].kwargs["latest_bundle"])
         self.assertFalse(render_figures_mock.call_args_list[1].kwargs["latest_bundle"])
-        self.assertEqual(
-            [
-                (
-                    call.args[1].name,
-                    call.args[1].spatial_trainable,
-                    call.args[1].temporal_trainable,
-                    call.args[1].fusion_trainable,
-                )
-                for call in freeze_mock.call_args_list
-            ],
-            [
-                ("temporal_warmup", False, True, True),
-                ("temporal_warmup", False, True, True),
-                ("temporal_warmup", False, True, True),
-                ("spatial_refine_temporal_frozen", True, False, True),
-            ],
-        )
         self.assertEqual(train_epoch_mock.call_args_list[0].kwargs["total_batches"], 11)
         self.assertEqual(train_epoch_mock.call_args_list[0].kwargs["stage_label"], "Train 1/4")
         self.assertEqual(val_epoch_mock.call_args_list[0].kwargs["total_batches"], 7)
@@ -702,7 +757,8 @@ class TrainModuleTestCase(unittest.TestCase):
         self.assertTrue(payload["train_config"]["use_pos_weight"])
         self.assertTrue(payload["train_config"]["auto_pos_weight"])
         self.assertEqual(payload["train_config"]["max_pos_weight"], 2.0)
-        self.assertEqual(payload["train_config"]["spatial_freeze_warmup_epochs"], 3)
+        self.assertEqual(payload["train_config"]["spatial_freeze_warmup_epochs"], 0)
+        self.assertEqual(payload["train_config"]["warmup_epochs"], 0)
         self.assertEqual(payload["model_config"]["temporal_num_frames"], 7)
         self.assertEqual(payload["class_balance"]["positive_class_name"], "real")
         self.assertEqual(payload["class_balance"]["effective_pos_weight"], 2.0)

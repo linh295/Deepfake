@@ -20,13 +20,18 @@ from training.utils.builders import (
     build_scheduler,
 )
 from training.utils.class_balance import build_class_balance_info
-from training.utils.checkpointing import save_checkpoint, write_history
+from training.utils.checkpointing import (
+    initialize_weighted_fusion_from_branch_checkpoints,
+    load_checkpoint,
+    read_history,
+    save_checkpoint,
+    write_history,
+)
 from training.utils.figures import render_training_figures, resolve_figure_output_dirs
-from training.utils.freezing import apply_training_phase, resolve_alternate_freezing_phase
 from training.utils.loops import train_one_epoch, validate_one_epoch
 from training.utils.metrics import get_current_lrs, select_checkpoint_metric
 from training.utils.progress import build_progress_totals
-from training.utils.runtime import resolve_device, set_seed
+from training.utils.runtime import resolve_device, restore_rng_state, set_seed
 from training.temporal_diff_cnn import TEMPORAL_POOL_CHOICES
 
 
@@ -35,6 +40,9 @@ class TrainConfig:
     train_shards: str
     val_shards: str
     output_dir: str = "artifacts/experiments/st_detector"
+    resume_checkpoint: str | None = None
+    init_spatial_checkpoint: str | None = None
+    init_temporal_checkpoint: str | None = None
     epochs: int = 30
     batch_size: int = 12
     num_workers: int = 4
@@ -54,8 +62,13 @@ class TrainConfig:
     temporal_pool: str = "gru"
     use_spatial_attention: bool = True
     use_texture_enhancement: bool = True
-    use_cross_branch_attention: bool = True
     use_feature_delta: bool = False
+    spatial_only: bool = False
+    temporal_only: bool = False
+    fusion_mode: str = "concat"
+    fusion_spatial_weight: float = 0.65
+    learnable_fusion_weight: bool = False
+    branch_aux_loss_weight: float = 0.0
 
     seed: int = 42
     device: str = "cuda"
@@ -71,9 +84,8 @@ class TrainConfig:
     scheduler_patience: int = 2
     scheduler_threshold: float = 1e-4
     scheduler_min_lr: float = 0.0
-    spatial_freeze_warmup_epochs: int = 3
-    temporal_freeze_epochs: int = 3
-    
+    spatial_freeze_warmup_epochs: int = 0
+    warmup_epochs: int = 0
     use_augmentation: bool = False
     augment_recompute_diff: bool = True
     hflip_prob: float = 0.5
@@ -98,6 +110,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--train-shards", type=str, required=True, help='e.g. "clip_data/train/shard-*.tar"')
     parser.add_argument("--val-shards", type=str, required=True, help='e.g. "clip_data/val/shard-*.tar"')
     parser.add_argument("--output-dir", type=str, default="artifacts/experiments/st_detector")
+    parser.add_argument("--resume-checkpoint", type=str, default=None, help="Resume training from a saved checkpoint.")
+    parser.add_argument("--init-spatial-checkpoint", type=str, default=None)
+    parser.add_argument("--init-temporal-checkpoint", type=str, default=None)
 
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -118,8 +133,40 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--temporal-pool", type=str, choices=TEMPORAL_POOL_CHOICES, default="gru")
     parser.add_argument("--disable-spatial-attention", action="store_true")
     parser.add_argument("--disable-texture-enhancement", action="store_true")
-    parser.add_argument("--disable-cross-branch-attention", action="store_true")
     parser.add_argument("--use-feature-delta", action="store_true")
+    parser.add_argument(
+        "--spatial-only",
+        action="store_true",
+        help="Run a spatial-only ablation: skip temporal_branch and classify from spatial features only.",
+    )
+    parser.add_argument(
+        "--temporal-only",
+        action="store_true",
+        help="Run a temporal-only ablation: skip spatial_branch and classify from temporal features only.",
+    )
+    parser.add_argument(
+        "--fusion-mode",
+        choices=["concat", "weighted_prob"],
+        default="concat",
+        help="Feature concatenation or weighted late fusion of branch probabilities.",
+    )
+    parser.add_argument(
+        "--fusion-spatial-weight",
+        type=float,
+        default=0.65,
+        help="Initial/fixed spatial probability weight used by weighted_prob fusion.",
+    )
+    parser.add_argument(
+        "--learnable-fusion-weight",
+        action="store_true",
+        help="Allow weighted_prob fusion weights to be optimized instead of remaining fixed.",
+    )
+    parser.add_argument(
+        "--branch-aux-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for the mean spatial/temporal auxiliary classification loss.",
+    )
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
@@ -133,8 +180,18 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--scheduler-patience", type=int, default=2)
     parser.add_argument("--scheduler-threshold", type=float, default=1e-4)
     parser.add_argument("--scheduler-min-lr", type=float, default=0.0)
-    parser.add_argument("--spatial-freeze-warmup-epochs", type=int, default=3)
-    parser.add_argument("--temporal-freeze-epochs", type=int, default=3)
+    parser.add_argument(
+        "--spatial-freeze-warmup-epochs",
+        type=int,
+        default=0,
+        help="Freeze spatial_branch for the first N epochs so temporal_branch and fusion_head train first.",
+    )
+    parser.add_argument(
+        "--warmup-epochs",
+        type=int,
+        default=0,
+        help="Linearly warm all optimizer parameter-group LRs from 0 to target over the first N epochs.",
+    )
     parser.add_argument("--disable-pin-memory", action="store_true")
     parser.add_argument("--disable-persistent-workers", action="store_true")
     parser.add_argument("--use-augmentation", action="store_true")
@@ -153,11 +210,30 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--blur-sigma-min", type=float, default=0.1)
     parser.add_argument("--blur-sigma-max", type=float, default=1.0)
     args = parser.parse_args()
+    if args.spatial_only and args.temporal_only:
+        parser.error("--spatial-only and --temporal-only cannot be used together")
+    if args.fusion_mode == "weighted_prob" and (args.spatial_only or args.temporal_only):
+        parser.error("--fusion-mode weighted_prob requires both spatial and temporal branches")
+    if not 0.0 < args.fusion_spatial_weight < 1.0:
+        parser.error("--fusion-spatial-weight must be strictly between 0 and 1")
+    if args.branch_aux_loss_weight < 0.0:
+        parser.error("--branch-aux-loss-weight must be greater than or equal to 0")
+    if args.branch_aux_loss_weight > 0.0 and args.fusion_mode != "weighted_prob":
+        parser.error("--branch-aux-loss-weight requires --fusion-mode weighted_prob")
+    if bool(args.init_spatial_checkpoint) != bool(args.init_temporal_checkpoint):
+        parser.error("--init-spatial-checkpoint and --init-temporal-checkpoint must be provided together")
+    if args.init_spatial_checkpoint and args.fusion_mode != "weighted_prob":
+        parser.error("Branch checkpoint initialization requires --fusion-mode weighted_prob")
+    if args.resume_checkpoint and args.init_spatial_checkpoint:
+        parser.error("--resume-checkpoint cannot be combined with branch checkpoint initialization")
 
     return TrainConfig(
         train_shards=args.train_shards,
         val_shards=args.val_shards,
         output_dir=args.output_dir,
+        resume_checkpoint=args.resume_checkpoint,
+        init_spatial_checkpoint=args.init_spatial_checkpoint,
+        init_temporal_checkpoint=args.init_temporal_checkpoint,
         epochs=args.epochs,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -174,8 +250,13 @@ def parse_args() -> TrainConfig:
         temporal_pool=args.temporal_pool,
         use_spatial_attention=not args.disable_spatial_attention,
         use_texture_enhancement=not args.disable_texture_enhancement,
-        use_cross_branch_attention=not args.disable_cross_branch_attention,
         use_feature_delta=args.use_feature_delta,
+        spatial_only=args.spatial_only,
+        temporal_only=args.temporal_only,
+        fusion_mode=args.fusion_mode,
+        fusion_spatial_weight=args.fusion_spatial_weight,
+        learnable_fusion_weight=args.learnable_fusion_weight,
+        branch_aux_loss_weight=args.branch_aux_loss_weight,
         seed=args.seed,
         device=args.device,
         use_amp=not args.disable_amp,
@@ -191,7 +272,7 @@ def parse_args() -> TrainConfig:
         scheduler_threshold=args.scheduler_threshold,
         scheduler_min_lr=args.scheduler_min_lr,
         spatial_freeze_warmup_epochs=args.spatial_freeze_warmup_epochs,
-        temporal_freeze_epochs=args.temporal_freeze_epochs,
+        warmup_epochs=args.warmup_epochs,
         use_augmentation=args.use_augmentation,
         augment_recompute_diff=not args.disable_augment_recompute_diff,
         hflip_prob=args.hflip_prob,
@@ -200,7 +281,30 @@ def parse_args() -> TrainConfig:
         loss_type=args.loss_type,
         focal_alpha=args.focal_alpha,
         focal_gamma=args.focal_gamma,
+        jpeg_prob=args.jpeg_prob,
+        jpeg_quality_min=args.jpeg_quality_min,
+        jpeg_quality_max=args.jpeg_quality_max,
+        blur_prob=args.blur_prob,
+        blur_sigma_min=args.blur_sigma_min,
+        blur_sigma_max=args.blur_sigma_max,
     )
+
+
+def apply_spatial_warmup_freeze(model: torch.nn.Module, epoch: int, warmup_epochs: int) -> str:
+    spatial_branch = getattr(model, "spatial_branch", None)
+    if spatial_branch is None or not hasattr(spatial_branch, "freeze") or not hasattr(spatial_branch, "unfreeze"):
+        return "full_train"
+
+    if warmup_epochs <= 0:
+        spatial_branch.unfreeze()
+        return "full_train"
+
+    if epoch <= warmup_epochs:
+        spatial_branch.freeze()
+        return "temporal_warmup_spatial_frozen"
+
+    spatial_branch.unfreeze()
+    return "full_train"
 
 
 def main() -> None:
@@ -220,18 +324,20 @@ def main() -> None:
     logger.info("Val shards: {}", cfg.val_shards)
     logger.info("Invert binary labels: {}", cfg.invert_binary_labels)
     logger.info(
-        "Model options | dropout={} | temporal_pool={} | spatial_attention={} | texture_enhancement={} | cross_branch_attention={} | feature_delta={}",
+        "Model options | dropout={} | temporal_pool={} | spatial_attention={} | texture_enhancement={} | feature_delta={} | spatial_only={} | temporal_only={} | fusion_mode={} | fusion_spatial_weight={} | learnable_fusion_weight={} | branch_aux_loss_weight={} | spatial_freeze_warmup_epochs={} | warmup_epochs={}",
         cfg.model_dropout,
         cfg.temporal_pool,
         cfg.use_spatial_attention,
         cfg.use_texture_enhancement,
-        cfg.use_cross_branch_attention,
         cfg.use_feature_delta,
-    )
-    logger.info(
-        "Alternate freezing | spatial_freeze_warmup_epochs={} | temporal_freeze_epochs={}",
+        cfg.spatial_only,
+        cfg.temporal_only,
+        cfg.fusion_mode,
+        cfg.fusion_spatial_weight,
+        cfg.learnable_fusion_weight,
+        cfg.branch_aux_loss_weight,
         cfg.spatial_freeze_warmup_epochs,
-        cfg.temporal_freeze_epochs,
+        cfg.warmup_epochs,
     )
 
     train_loader, val_loader = build_dataloaders(cfg)
@@ -250,6 +356,20 @@ def main() -> None:
         )
 
     model, model_cfg = build_model(cfg, device)
+    if cfg.init_spatial_checkpoint is not None and cfg.init_temporal_checkpoint is not None:
+        init_stats = initialize_weighted_fusion_from_branch_checkpoints(
+            model=model,
+            spatial_checkpoint=cfg.init_spatial_checkpoint,
+            temporal_checkpoint=cfg.init_temporal_checkpoint,
+            map_location=device,
+        )
+        logger.info(
+            "Initialized weighted fusion from branch checkpoints | spatial={} | temporal={} | loaded_parameters={} | uninitialized_parameters={}",
+            cfg.init_spatial_checkpoint,
+            cfg.init_temporal_checkpoint,
+            init_stats["loaded_parameters"],
+            init_stats["uninitialized_parameters"],
+        )
     criterion = build_loss(cfg, device, class_balance_info)
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
@@ -259,6 +379,7 @@ def main() -> None:
     best_selection_metric = -math.inf
     best_epoch = -1
     epochs_without_improvement = 0
+    start_epoch = 1
     history: dict[str, Any] = {
         "run": {
             "class_balance": class_balance_info.as_dict() if class_balance_info is not None else None,
@@ -268,12 +389,75 @@ def main() -> None:
             "temporal_pool": cfg.temporal_pool,
             "use_spatial_attention": cfg.use_spatial_attention,
             "use_texture_enhancement": cfg.use_texture_enhancement,
-            "use_cross_branch_attention": cfg.use_cross_branch_attention,
             "use_feature_delta": cfg.use_feature_delta,
+            "spatial_only": cfg.spatial_only,
+            "temporal_only": cfg.temporal_only,
+            "fusion_mode": cfg.fusion_mode,
+            "fusion_spatial_weight": cfg.fusion_spatial_weight,
+            "learnable_fusion_weight": cfg.learnable_fusion_weight,
+            "branch_aux_loss_weight": cfg.branch_aux_loss_weight,
+            "init_spatial_checkpoint": cfg.init_spatial_checkpoint,
+            "init_temporal_checkpoint": cfg.init_temporal_checkpoint,
+            "spatial_freeze_warmup_epochs": cfg.spatial_freeze_warmup_epochs,
+            "warmup_epochs": cfg.warmup_epochs,
         },
         "train": [],
         "val": [],
     }
+
+    if cfg.resume_checkpoint is not None:
+        resume_path = Path(cfg.resume_checkpoint)
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        checkpoint = load_checkpoint(resume_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state"], strict=True)
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+        if checkpoint.get("scaler_state"):
+            scaler.load_state_dict(checkpoint["scaler_state"])
+        if checkpoint.get("rng_state"):
+            restore_rng_state(checkpoint["rng_state"])
+
+        start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        best_val_auc = float(checkpoint.get("best_val_auc", best_val_auc))
+        best_selection_metric = float(checkpoint.get("best_selection_metric", best_selection_metric))
+        history_path = output_dir / "history.json"
+        if history_path.exists():
+            history = read_history(history_path)
+            history.setdefault("run", {})
+            history.setdefault("train", [])
+            history.setdefault("val", [])
+            history["run"].update(
+                {
+                    "class_balance": class_balance_info.as_dict() if class_balance_info is not None else None,
+                    "use_pos_weight": cfg.use_pos_weight,
+                    "auto_pos_weight": cfg.auto_pos_weight,
+                    "model_dropout": cfg.model_dropout,
+                    "temporal_pool": cfg.temporal_pool,
+                    "use_spatial_attention": cfg.use_spatial_attention,
+                    "use_texture_enhancement": cfg.use_texture_enhancement,
+                    "use_feature_delta": cfg.use_feature_delta,
+                    "spatial_only": cfg.spatial_only,
+                    "temporal_only": cfg.temporal_only,
+                    "fusion_mode": cfg.fusion_mode,
+                    "fusion_spatial_weight": cfg.fusion_spatial_weight,
+                    "learnable_fusion_weight": cfg.learnable_fusion_weight,
+                    "branch_aux_loss_weight": cfg.branch_aux_loss_weight,
+                    "init_spatial_checkpoint": cfg.init_spatial_checkpoint,
+                    "init_temporal_checkpoint": cfg.init_temporal_checkpoint,
+                    "spatial_freeze_warmup_epochs": cfg.spatial_freeze_warmup_epochs,
+                    "warmup_epochs": cfg.warmup_epochs,
+                }
+            )
+            if history["val"]:
+                best_epoch = int(max(history["val"], key=lambda row: float(row.get("selection_metric", -math.inf))).get("epoch", -1))
+        logger.info(
+            "Resumed checkpoint {} | start_epoch={} | best_val_auc={} | best_selection_metric={:.4f}",
+            resume_path,
+            start_epoch,
+            best_val_auc,
+            best_selection_metric,
+        )
 
     if class_balance_info is not None:
         logger.info(
@@ -289,15 +473,13 @@ def main() -> None:
                 "Auto pos_weight could not be derived safely from train shards; falling back to unweighted BCEWithLogitsLoss."
             )
 
-    for epoch in range(1, cfg.epochs + 1):
-        phase = resolve_alternate_freezing_phase(
-            epoch,
-            spatial_freeze_warmup_epochs=cfg.spatial_freeze_warmup_epochs,
-            temporal_freeze_epochs=cfg.temporal_freeze_epochs,
+    for epoch in range(start_epoch, cfg.epochs + 1):
+        phase_name = apply_spatial_warmup_freeze(
+            model,
+            epoch=epoch,
+            warmup_epochs=cfg.spatial_freeze_warmup_epochs,
         )
-        phase_name = phase.name
-        apply_training_phase(model, phase)
-
+        logger.info("Epoch {} phase: {}", epoch, phase_name)
         epoch_start = time.time()
         train_metrics = train_one_epoch(
             model,
@@ -323,13 +505,13 @@ def main() -> None:
         )
 
         current_selection_metric, selection_metric_name = select_checkpoint_metric(val_metrics)
-        scheduler.step(current_selection_metric)
+        current_lrs = get_current_lrs(optimizer)
+        scheduler_phase = scheduler.step(current_selection_metric, epoch=epoch)
 
         current_val_auc = float(val_metrics["auc"])
         if not math.isnan(current_val_auc):
             if math.isnan(best_val_auc) or current_val_auc > best_val_auc:
                 best_val_auc = current_val_auc
-        current_lrs = get_current_lrs(optimizer)
 
         history["train"].append({"epoch": epoch, **train_metrics})
         history["val"].append(
@@ -340,13 +522,14 @@ def main() -> None:
                 "selection_metric_name": selection_metric_name,
                 "learning_rates": current_lrs,
                 "phase": phase_name,
+                "scheduler_phase": scheduler_phase,
             }
         )
 
         elapsed = time.time() - epoch_start
         logger.info(
             "Epoch {} | time={:.1f}s | train_loss={:.4f} train_auc={:.4f} train_acc={:.4f} | "
-            "val_loss={:.4f} val_auc={:.4f} val_acc={:.4f} | phase={} | {}={:.4f} | lrs={}",
+            "val_loss={:.4f} val_auc={:.4f} val_acc={:.4f} | phase={} | scheduler={} | {}={:.4f} | lrs={}",
             epoch,
             elapsed,
             train_metrics["loss"],
@@ -356,10 +539,18 @@ def main() -> None:
             val_metrics["auc"],
             val_metrics["accuracy"],
             phase_name,
+            scheduler_phase,
             selection_metric_name,
             current_selection_metric,
             current_lrs,
         )
+        if cfg.fusion_mode == "weighted_prob":
+            logger.info(
+                "Epoch {} branch validation | spatial_auc={:.4f} | temporal_auc={:.4f}",
+                epoch,
+                val_metrics["spatial_auc"],
+                val_metrics["temporal_auc"],
+            )
 
         is_new_best = current_selection_metric > best_selection_metric
         should_stop = False

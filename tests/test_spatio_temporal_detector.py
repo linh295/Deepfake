@@ -14,7 +14,7 @@ from training import (
     SpatioTemporalDeepfakeDetector,
     TemporalDiffCNN,
 )
-from training.utils.freezing import resolve_alternate_freezing_phase
+from training.fusion_head import WeightedProbabilityFusionHead
 
 
 class _FakeResNet(nn.Module):
@@ -84,6 +84,85 @@ class SpatioTemporalDetectorTestCase(unittest.TestCase):
         logits = model(torch.randn(2, 3, 224, 224), torch.randn(2, 7, 3, 224, 224))
         self.assertEqual(tuple(logits.shape), (2, 3))
 
+    def test_spatial_only_skips_temporal_branch(self) -> None:
+        cfg = ModelConfig(pretrained=False, spatial_only=True, use_texture_enhancement=False)
+        with mock.patch("training.spatial_resnet50._load_torchvision_models", return_value=_fake_torchvision_models()):
+            model = SpatioTemporalDeepfakeDetector(cfg)
+
+        with mock.patch.object(model.temporal_branch, "forward", wraps=model.temporal_branch.forward) as temporal_forward:
+            logits, features = model(
+                torch.randn(2, 3, 224, 224),
+                torch.empty(2, 0, 3, 1, 1),
+                return_features=True,
+            )
+
+        self.assertEqual(tuple(logits.shape), (2,))
+        self.assertIn("spatial_feat", features)
+        self.assertNotIn("temporal_feat", features)
+        temporal_forward.assert_not_called()
+
+    def test_temporal_only_skips_spatial_branch(self) -> None:
+        model = SpatioTemporalDeepfakeDetector(
+            ModelConfig(pretrained=False, temporal_only=True, temporal_pool="gru_attn")
+        )
+
+        with mock.patch.object(model.spatial_branch, "forward", wraps=model.spatial_branch.forward) as spatial_forward:
+            logits, features = model(
+                torch.empty(2, 3, 1, 1),
+                torch.randn(2, 7, 3, 32, 32),
+                return_features=True,
+            )
+
+        self.assertEqual(tuple(logits.shape), (2,))
+        self.assertNotIn("spatial_feat", features)
+        self.assertIn("temporal_feat", features)
+        self.assertIn("temporal_attn", features)
+        spatial_forward.assert_not_called()
+
+    def test_single_branch_modes_are_mutually_exclusive(self) -> None:
+        with self.assertRaises(ValueError):
+            ModelConfig(spatial_only=True, temporal_only=True)
+
+    def test_weighted_probability_fusion_matches_probability_ensemble(self) -> None:
+        head = WeightedProbabilityFusionHead(
+            spatial_dim=2,
+            temporal_dim=2,
+            hidden_dim=4,
+            spatial_weight=0.65,
+            dropout=0.0,
+        ).eval()
+        spatial = torch.randn(3, 2)
+        temporal = torch.randn(3, 2)
+
+        with torch.no_grad():
+            fused_logit, outputs = head(spatial, temporal, return_branch_outputs=True)
+
+        expected_prob = 0.65 * outputs["spatial_prob"] + 0.35 * outputs["temporal_prob"]
+        self.assertTrue(torch.allclose(torch.sigmoid(fused_logit), expected_prob, atol=1e-6))
+        self.assertTrue(torch.allclose(outputs["fusion_weights"], torch.tensor([0.65, 0.35]), atol=1e-6))
+
+    def test_detector_weighted_probability_fusion_returns_branch_outputs(self) -> None:
+        cfg = ModelConfig(
+            pretrained=False,
+            use_texture_enhancement=False,
+            temporal_pool="mean",
+            fusion_mode="weighted_prob",
+            fusion_spatial_weight=0.65,
+        )
+        with mock.patch("training.spatial_resnet50._load_torchvision_models", return_value=_fake_torchvision_models()):
+            model = SpatioTemporalDeepfakeDetector(cfg)
+
+        logits, features = model(
+            torch.randn(2, 3, 224, 224),
+            torch.randn(2, 7, 3, 32, 32),
+            return_features=True,
+        )
+
+        self.assertEqual(tuple(logits.shape), (2,))
+        self.assertIn("spatial_prob", features)
+        self.assertIn("temporal_prob", features)
+        self.assertIn("fusion_weights", features)
+
     def test_attention_pool_runs(self) -> None:
         cfg = ModelConfig(pretrained=False, temporal_pool="attention")
         with mock.patch("training.spatial_resnet50._load_torchvision_models", return_value=_fake_torchvision_models()):
@@ -92,8 +171,13 @@ class SpatioTemporalDetectorTestCase(unittest.TestCase):
         logits = model(torch.randn(2, 3, 224, 224), torch.randn(2, 7, 3, 224, 224))
         self.assertEqual(tuple(logits.shape), (2,))
 
-    def test_detector_passes_spatial_attention_to_temporal_branch(self) -> None:
-        cfg = ModelConfig(pretrained=False, temporal_pool="mean", use_cross_branch_attention=True)
+    def test_detector_does_not_pass_spatial_attention_to_temporal_branch(self) -> None:
+        cfg = ModelConfig(
+            pretrained=False,
+            temporal_pool="mean",
+            use_texture_enhancement=False,
+            use_cross_branch_attention=True,
+        )
         with mock.patch("training.spatial_resnet50._load_torchvision_models", return_value=_fake_torchvision_models()):
             model = SpatioTemporalDeepfakeDetector(cfg)
 
@@ -106,20 +190,7 @@ class SpatioTemporalDetectorTestCase(unittest.TestCase):
 
         self.assertEqual(tuple(logits.shape), (2,))
         self.assertIn("spatial_attn", features)
-        self.assertIsNotNone(temporal_forward.call_args.kwargs["spatial_attention"])
-
-    def test_detector_can_disable_cross_branch_attention(self) -> None:
-        cfg = ModelConfig(pretrained=False, temporal_pool="mean", use_cross_branch_attention=False)
-        with mock.patch("training.spatial_resnet50._load_torchvision_models", return_value=_fake_torchvision_models()):
-            model = SpatioTemporalDeepfakeDetector(cfg)
-
-        with mock.patch.object(model.temporal_branch, "forward", wraps=model.temporal_branch.forward) as temporal_forward:
-            model(
-                torch.randn(2, 3, 224, 224),
-                torch.randn(2, 7, 3, 224, 224),
-            )
-
-        self.assertIsNone(temporal_forward.call_args.kwargs["spatial_attention"])
+        self.assertNotIn("spatial_attention", temporal_forward.call_args.kwargs)
 
     def test_temporal_frame_count_validation_raises(self) -> None:
         with mock.patch("training.spatial_resnet50._load_torchvision_models", return_value=_fake_torchvision_models()):
@@ -159,50 +230,6 @@ class SpatioTemporalDetectorTestCase(unittest.TestCase):
         self.assertTrue(all(param.requires_grad for param in branch.parameters()))
         self.assertTrue(all(module.training for module in batch_norms))
 
-    def test_temporal_branch_can_freeze_and_unfreeze_at_runtime(self) -> None:
-        branch = TemporalDiffCNN(pool_mode="gru")
-
-        self.assertTrue(all(param.requires_grad for param in branch.parameters()))
-
-        branch.set_trainable(False)
-        branch.train()
-        batch_norms = [module for module in branch.modules() if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d))]
-
-        self.assertTrue(all(not param.requires_grad for param in branch.parameters()))
-        self.assertTrue(batch_norms)
-        self.assertTrue(all(not module.training for module in batch_norms))
-        self.assertFalse(branch.training)
-
-        branch.set_trainable(True)
-        branch.train()
-
-        self.assertTrue(all(param.requires_grad for param in branch.parameters()))
-        self.assertTrue(all(module.training for module in batch_norms))
-        self.assertTrue(branch.training)
-
-    def test_alternate_freezing_phase_schedule(self) -> None:
-        phases = [
-            resolve_alternate_freezing_phase(
-                epoch,
-                spatial_freeze_warmup_epochs=3,
-                temporal_freeze_epochs=3,
-            )
-            for epoch in range(1, 8)
-        ]
-
-        self.assertEqual(
-            [(phase.name, phase.spatial_trainable, phase.temporal_trainable) for phase in phases],
-            [
-                ("temporal_warmup", False, True),
-                ("temporal_warmup", False, True),
-                ("temporal_warmup", False, True),
-                ("spatial_refine_temporal_frozen", True, False),
-                ("spatial_refine_temporal_frozen", True, False),
-                ("spatial_refine_temporal_frozen", True, False),
-                ("full_finetune", True, True),
-            ],
-        )
-
     def test_temporal_branch_accepts_noncontiguous_input(self) -> None:
         branch = TemporalDiffCNN(pool_mode="mean")
         x = torch.randn(2, 3, 7, 32, 32).permute(0, 2, 1, 3, 4)
@@ -210,15 +237,6 @@ class SpatioTemporalDetectorTestCase(unittest.TestCase):
         output = branch(x)
 
         self.assertEqual(tuple(output.shape), (2, 256))
-
-    def test_temporal_branch_accepts_spatial_attention_gate(self) -> None:
-        branch = TemporalDiffCNN(pool_mode="mean")
-        x = torch.randn(2, 7, 3, 32, 32)
-        spatial_attention = torch.rand(2, 1, 7, 7)
-
-        output = branch(x, spatial_attention=spatial_attention)
-
-        self.assertEqual(tuple(output.shape), (2, branch.feature_dim))
 
     def test_gru_pooling_variants_return_feature_dim(self) -> None:
         x = torch.randn(2, 7, 3, 32, 32)

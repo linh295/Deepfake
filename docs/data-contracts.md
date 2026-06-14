@@ -123,24 +123,21 @@ Truong metadata quan trong trong `json`:
 - `landmarks`
 - `alignment_mode`
 - `crop_scale`
-- `align_status`
 - `crop_status`
 - `crop_x1`, `crop_y1`, `crop_x2`, `crop_y2`
 - `crop_size`
 - `crop_source`
 - `aligned_width`, `aligned_height`
 - `aligned_size`
-- `align_canvas_width`, `align_canvas_height`
-- `align_canvas_size`
-- `affine_matrix`
 - `image_format`
 - `detect_every_k`
 
 Ghi chu:
 
 - `bbox_*` nam trong toa do anh goc.
-- `crop_*` nam trong toa do align canvas.
+- `crop_*` nam trong toa do anh goc.
 - `aligned_width/height` la kich thuoc output sau resize.
+- `alignment_mode` la `none_bbox_crop`; landmark RetinaFace chi duoc luu metadata, khong bien doi pixel.
 - `bbox_source` co the la direct/keyframe/interpolated tuy detection path.
 - Audit face detection ghi metadata cua sample da ghi thanh cong.
 
@@ -173,6 +170,7 @@ Truong metadata trong `json`:
 - `clip_length`
 - `frame_stride`
 - `clip_stride`
+- `clip_start`
 - `num_differences`
 - `frame_numbers`
 - `original_frame_indices`
@@ -272,13 +270,6 @@ Moi row trong `val` gom cac metric tren va:
 - `selection_metric`
 - `selection_metric_name`
 - `learning_rates`
-- `phase`
-
-`phase`:
-
-- `temporal_warmup` khi spatial branch dang freeze.
-- `spatial_refine_temporal_frozen` khi temporal branch dang freeze sau warmup.
-- `full_finetune` sau alternate freezing.
 
 ## 8. Checkpoint `.pt`
 

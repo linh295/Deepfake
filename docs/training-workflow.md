@@ -69,10 +69,7 @@ Model:
 - `--temporal-pool {mean,attention,gru,gru_mean,gru_max,gru_mean_max,gru_attn}`
 - `--disable-spatial-attention`
 - `--disable-texture-enhancement`
-- `--disable-cross-branch-attention`
 - `--use-feature-delta`
-- `--spatial-freeze-warmup-epochs`
-- `--temporal-freeze-epochs`
 
 Augmentation:
 
@@ -132,16 +129,13 @@ Spatial branch:
 - ResNet50 ImageNet.
 - Texture enhancement mac dinh bat.
 - Spatial attention mac dinh bat.
-- Alternate freezing mac dinh:
-  - epoch 1 den `--spatial-freeze-warmup-epochs`: freeze spatial, train temporal + fusion.
-  - `--temporal-freeze-epochs` epoch tiep theo: freeze temporal, train spatial + fusion.
-  - sau do: train full model.
+- Spatial, temporal va fusion branch duoc train dong thoi tu epoch dau.
 
 Temporal branch:
 
 - Input la `diff.npy`, do dai `clip_len - 1`.
 - CNN residual encode tung timestep.
-- Mac dinh nhan spatial attention map tu spatial branch vao temporal feature map truoc global pooling va GRU.
+- Temporal branch hoat dong doc lap voi spatial branch cho den FusionHead.
 - `--use-feature-delta`: concat `|x_t - x_{t-1}|` vao feature tung timestep truoc GRU.
 - `--temporal-pool mean`: average theo thoi gian.
 - `--temporal-pool attention`: learned attention theo timestep.

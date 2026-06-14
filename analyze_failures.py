@@ -19,6 +19,7 @@ from sklearn.manifold import TSNE
 from torch.amp import autocast
 from tqdm import tqdm
 
+from training.fusion_head import WeightedProbabilityFusionHead
 from training.spatio_temporal_detector import ModelConfig, SpatioTemporalDeepfakeDetector
 from training.train import TrainConfig
 from training.utils.builders import build_dataloaders, build_model
@@ -127,7 +128,6 @@ def build_eval_config(args: argparse.Namespace, ckpt: dict[str, Any]) -> TrainCo
         use_texture_enhancement=bool(
             train_cfg.get("use_texture_enhancement", model_cfg.get("use_texture_enhancement", True))
         ),
-        use_cross_branch_attention=bool(model_cfg.get("use_cross_branch_attention", True)),
         seed=args.seed,
         device=args.device,
         use_amp=not args.disable_amp,
@@ -151,6 +151,11 @@ def fusion_embeddings(
     spatial_feat: torch.Tensor,
     temporal_feat: torch.Tensor,
 ) -> torch.Tensor:
+    if isinstance(model.fusion_head, WeightedProbabilityFusionHead):
+        spatial_embedding = model.fusion_head.spatial_head[:-1](spatial_feat)
+        temporal_embedding = model.fusion_head.temporal_head[:-1](temporal_feat)
+        return torch.cat([spatial_embedding, temporal_embedding], dim=1)
+
     fused = torch.cat([spatial_feat, temporal_feat], dim=1)
     return model.fusion_head.net[:-1](fused)
 
@@ -160,15 +165,17 @@ def forward_with_embeddings(
     spatial: torch.Tensor,
     temporal: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    spatial_feat, spatial_extras = model.spatial_branch(
+    spatial_feat, _ = model.spatial_branch(
         spatial,
         return_attention=True,
         return_feature_maps=False,
     )
-    spatial_gate = spatial_extras.get("spatial_attn") if model.config.use_cross_branch_attention else None
-    temporal_feat = model.temporal_branch(temporal, spatial_attention=spatial_gate)
+    temporal_feat = model.temporal_branch(temporal)
     embeddings = fusion_embeddings(model, spatial_feat, temporal_feat)
-    logits = model.fusion_head.net[-1](embeddings)
+    if isinstance(model.fusion_head, WeightedProbabilityFusionHead):
+        logits = model.fusion_head(spatial_feat, temporal_feat)
+    else:
+        logits = model.fusion_head.net[-1](embeddings)
     if model.config.num_classes == 1:
         logits = logits.squeeze(1)
     return logits, embeddings
@@ -244,12 +251,11 @@ def compute_temporal_frame_probabilities(
     *,
     use_amp: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
-    spatial_feat, spatial_extras = model.spatial_branch(
+    spatial_feat, _ = model.spatial_branch(
         spatial,
         return_attention=True,
         return_feature_maps=False,
     )
-    spatial_gate = spatial_extras.get("spatial_attn") if model.config.use_cross_branch_attention else None
 
     frame_probs: list[float] = []
     motion_magnitude: list[float] = []
@@ -263,9 +269,12 @@ def compute_temporal_frame_probabilities(
             motion_magnitude.append(0.0)
 
         with autocast(device_type=spatial.device.type, enabled=use_amp and spatial.device.type == "cuda"):
-            temporal_feat = model.temporal_branch(single_frame_clip, spatial_attention=spatial_gate)
-            embedding = fusion_embeddings(model, spatial_feat, temporal_feat)
-            logit = model.fusion_head.net[-1](embedding)
+            temporal_feat = model.temporal_branch(single_frame_clip)
+            if isinstance(model.fusion_head, WeightedProbabilityFusionHead):
+                logit = model.fusion_head(spatial_feat, temporal_feat)
+            else:
+                embedding = fusion_embeddings(model, spatial_feat, temporal_feat)
+                logit = model.fusion_head.net[-1](embedding)
             if model.config.num_classes == 1:
                 logit = logit.squeeze(1)
             prob = torch.sigmoid(logit.reshape(-1)[0])
